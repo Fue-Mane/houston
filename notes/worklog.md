@@ -18,6 +18,7 @@ How this file works:
 - **Naming and meta work:** done for plant drinks (33), flakes (23), pasta (44), gnocchi (2), vinegars (6), cooking creams (5) and Happymais meta descriptions (4).
   - Next group is **Orez, 10 products**. The order of the remaining groups is in the 30 Sep session log §6.
 - **Google Analytics and Google Ads:** not connected yet.
+- **WinMENTOR link:** since 17 Oct 2026, a courier on the office PC uploads WinMENTOR data to Google Cloud Storage bucket `bwe` (project houston-511111) at logon and at 16:00. History is backfilled to 2026_08. Houston doesn't read the bucket yet.
 
 ## Decisions
 
@@ -29,6 +30,14 @@ How this file works:
 - **Database:** SQLite, because Houston writes while the MCP connection reads. Future sources get their own tables, with every row dated.
 - **MCP:** reads Houston's local copy only. No live store reads and no API key in the Claude config.
 - **Content audit:** no fixed character limits for titles or meta descriptions. Google shortens them to fit the screen.
+- **WinMENTOR link, 17 Oct 2026:**
+  - **Push, not live.** The office PC uploads to Google Cloud Storage bucket `bwe`; a daily update is enough (Stefan).
+  - **Office side stays dumb:** a fixed list of read functions and raw files, with no interpretation. All interpretation happens in Houston.
+  - **Credentials:** the office PC has its own robot account, write-only to `bwe`, with one key encrypted on that PC. It never uses nicoleta@biomania.ro.
+  - **Customer details are kept,** including in the cloud (Stefan). Delegates and employee data are left out.
+  - **Stock rule:** a product's total stock is Depozit central plus VANZARI EN-GROS. All other warehouses are excluded (Stefan).
+  - **Product codes** are exported as WinMENTOR internal codes, which match Magento SKUs. Catalogue and stock are also exported with EANs.
+  - **Changes on the office PC** are made in person at the office, not through AnyDesk (Stefan).
 
 ## Open items
 
@@ -51,6 +60,26 @@ How this file works:
 - **Houston backlog:**
   - alt texts in Bulk edit;
   - Google Analytics and Google Ads tables.
+- **WinMENTOR link (17 Oct 2026):**
+  - **Houston side:** a loader that reads `bwe` into Houston's database. Houston needs its own read access to the bucket.
+  - **Questions for the WinMENTOR operator:** a Romanian message was drafted 17 Oct and is not yet sent. It covers:
+    - series V-MKTP, document type AE and the sales flag "S"
+    - how biomania.ro and eMAG orders are entered
+    - customer emails and customer codes
+    - whether the stock-line date is the expiry date
+    - what the unit cost includes, and whether 1,1 is the supplier's euro price
+    - the two Da/Nu catalogue flags
+    - NC and PV
+    - the unbilled order of 01.12.2024
+    - whether months get corrected after they end
+  - **Re-read window:** daily runs re-read only the current and previous month, so later corrections are missed. Decide on 3 months (plus a monthly 12-month re-read) after the operator's answer, or measure it by comparing September across the daily files.
+  - **Morning run:** on the next office visit, check `export.log` for whether the logon run reads sales before WinMENTOR is opened.
+  - **Security housekeeping:**
+    - delete the local copy of the key `.json`
+    - set both "Disable service account key creation" policies back to Inherit parent's policy
+    - delete `test/` in `bwe`
+  - **Bucket region:** customer data sits in a US region because that's where the free tier is. An EU bucket would cost cents a month. Not decided.
+  - **Customer emails:** none found as a column. The manifest's `customers_with_at_sign` counts, per column, how many customer records contain an "@".
 
 ## Log
 
@@ -170,3 +199,25 @@ Plant drinks, flakes, pasta, gnocchi, vinegars and cooking creams, plus canonica
 - **Search Console gap:** 2026-06-23 to 2026-09-08 still has 0 days in `gsc_totals`. Open item unchanged.
 - **Plan:** spec `houston-creator-trial-spec.md` (chat of 15 Oct). Instagram API with Instagram Login (Standard Access), TikTok Display API in sandbox, new GA4 table `ga4_social` (Romania; Organic Social or medium = social), branded search from `gsc_queries`, optional social code read from Magento's Coupons report.
 - **Pending, Stefan:** social code yes or no; renewal rule written before her first video; follower counts written down before her first video.
+
+### 2026-10-17 18:46 — WinMENTOR → Houston link: courier installed on the office PC, history backfilled
+- **WinMENTOR:** old classic version (TH Junior, Iași), no web API. Read access goes through its DocImpServer module (`D:\WinMent\DocImpServer.exe`, COM name `DocImpServer.DocImpObject`), which works only from 32-bit Windows PowerShell run as administrator.
+- **Databases:** BIOMANIA 2011_04–2020_09, BIO2019 2019_01–2024_12, BIO2025 2025_01–2026_10 (the current one, confirmed by Stefan). EXEMPLU is the demo.
+- **Locking:** stock reads work while WinMENTOR is open. The sales read fails while WinMENTOR is open on that PC ("Directory is locked", `D:\WINMENT\PRIVATE\`).
+- **Findings:**
+  - Stock list, Oct 2026: 894 lines (product × warehouse), 542 products by SKU. 119 lines have no EAN.
+  - With the internal-code setting, 95% of September sale lines carry a code matching Magento SKUs. The default gives EANs.
+  - Unit cost in lei is present: 6,251748 for the soy drink, in both receptions and stock per warehouse. A date on each stock line looks like the expiry date (soy drink 04.08.2027); unverified.
+  - Customer list: 3,871 customers with name, town, county, address, phone (96% filled) and fiscal code (4%). No column of email addresses. No customer ID anywhere; the partner list fails on fiscal code `IT 01691980484`.
+  - September 2026: 3,627 and 3,706 lines in the two sales lists.
+- **Google Cloud:**
+  - Bucket `bwe` (us-east1, Standard, uniform access, public access prevented) in project houston-511111. Billing linked, budget alert set.
+  - Robot account `winmentor-uploader@houston-511111.iam.gserviceaccount.com`, role Storage Object Creator on `bwe` only. It can add files, not read, list, replace or delete them.
+  - Key creation was blocked by the organisation's secure-by-default policy. Overridden for the Houston project to make one JSON key.
+- **Office PC:** key stored encrypted (Windows DPAPI, current user) in `C:\ProgramData\Houston\key.bin`, in a folder limited to Administrators and SYSTEM. Plain copy deleted. Upload test `test/hello-20261017-163029.txt` passed.
+- **Courier:** `C:\ProgramData\Houston\houston-export.ps1` v1, scheduled task "Houston WinMENTOR export", at logon and daily 16:00, hidden, highest privileges.
+  - Each run zips 12 current-state files, 7 monthly lists for the current and previous month, and a manifest into `daily/yyyy/MM/<stamp>.zip`.
+  - Failed uploads wait in `outbox` and are retried. Log: `C:\ProgramData\Houston\export.log`.
+- **Backfill:** one zip per older month in `history/<database>/<yyyy_MM>.zip` up to 2026_08, plus `history/<database>/_lists.zip` (catalogue and customers). September and October stay in the daily files.
+- **Result:** first normal run and backfill ran without errors; files visible in the bucket (Stefan, 17 Oct 2026).
+- **Left out:** delegates and employees, empty lists (discount criteria, reception attributes), the unbilled order of 01.12.2024, reference lists.
