@@ -94,10 +94,8 @@ def page_product_list():
                             disabled=[c for c, _, _ in COLS if c not in editable])
     if not st.button("Add table edits to review", type="primary"):
         return
-    by_sku = {r["sku"]: r for r in shown}
     changes, problems = [], []
-    for (_, before), (_, after) in zip(df.iterrows(), edited.iterrows()):
-        r = by_sku[before["sku"]]
+    for r, (_, before), (_, after) in zip(shown, df.iterrows(), edited.iterrows()):
         raw, name = r["raw_sku"] or r["sku"], r["name"]
         for col, label, how in COLS:
             if how is None or core.norm(after[col]) == core.norm(before[col]):
@@ -120,12 +118,18 @@ def page_product_list():
                 elif new and not wm.ean(new):
                     problems.append(f"{raw}: {new!r} isn't a valid EAN (8, 12 or 13 digits and a correct last digit)")
                     continue
+                elif new:
+                    new = wm.ean(new)                    # digits only, as the checks compare it
                 changes += core.product_diff(raw, rec, {code: new}, attrs)
             elif not r["wm_code"]:
                 problems.append(f"{raw}: not in WinMENTOR, so there's nothing there to change")
             elif col == "wm_ean" and not wm.ean(new):
                 problems.append(f"{raw}: {new!r} isn't a valid EAN (8, 12 or 13 digits and a correct last digit)")
             else:
+                if col == "wm_ean":
+                    new = wm.ean(new)
+                    if new == core.norm(before[col]):
+                        continue
                 changes.append(core.new_change("winmentor", r["wm_code"], label, core.norm(before[col]), new, name))
     for p in problems:
         st.error(p)

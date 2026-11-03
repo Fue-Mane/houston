@@ -86,15 +86,6 @@ def latest_date(prop):
     return row[0] if row and row[0] else None
 
 
-def _months(start, end):
-    out, cur = [], start
-    while cur <= end:
-        nxt = (cur.replace(day=1) + datetime.timedelta(days=32)).replace(day=1)
-        out.append((cur, min(end, nxt - datetime.timedelta(days=1))))
-        cur = nxt
-    return out
-
-
 def _is_quota(err):
     text = str(err).lower()
     return "exhausted" in text and ("per hour" in text or "per day" in text or "tokens" in text)
@@ -173,7 +164,7 @@ def pull(prop, start=None, end=None, progress=lambda f, t: None, data=None):
     data = data or services()[0]
     today = datetime.date.today()
     end = end or today - datetime.timedelta(days=1)
-    plan = {t: _months(start or _table_resume(prop, t, today), end) for t in REPORTS}
+    plan = {t: google_auth.month_chunks(start or _table_resume(prop, t, today), end) for t in REPORTS}
     pulled_at = core.now()
     counts, errors, quota = {t: 0 for t in REPORTS}, {}, {}
     steps, step, stopped = sum(len(m) for m in plan.values()), 0, None
@@ -226,11 +217,7 @@ def pull(prop, start=None, end=None, progress=lambda f, t: None, data=None):
 
 
 def missing_ranges(prop):
-    with closing(core.connect()) as c:
-        days = [datetime.date.fromisoformat(r[0]) for r in
-                c.execute("SELECT date FROM ga4_totals WHERE property = ? ORDER BY date", (prop,))]
-    return [(a + datetime.timedelta(days=1), b - datetime.timedelta(days=1), (b - a).days - 1)
-            for a, b in zip(days, days[1:]) if (b - a).days > 1]
+    return google_auth.missing_ranges("ga4_totals", prop)
 
 
 def totals(prop, start, end):

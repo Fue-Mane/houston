@@ -473,7 +473,6 @@ def change_log(sku: str = "", limit: int = 50) -> dict:
         cat = _get_cat()
     except ValueError:
         cat = {}
-    attrs = cat.get("attributes", {})
     
     res = []
     for e in log:

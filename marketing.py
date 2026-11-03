@@ -24,7 +24,9 @@ def status():
     with closing(core.connect()) as c:
         try:
             first, last = c.execute("SELECT MIN(date), MAX(date) FROM ga4_landing").fetchone()
-        except Exception:                               # noqa: BLE001  (no Google Analytics tables yet)
+        except Exception as e:                          # noqa: BLE001  (no Google Analytics tables yet)
+            if not core.missing_table(e):
+                raise
             return None
     if not last:
         return None
@@ -37,20 +39,35 @@ def _pages(c):
     try:
         return {f"/{(k or '').strip()}.html": ((sku or "").strip(), name or "")
                 for sku, name, k in c.execute("SELECT sku, name, url_key FROM products WHERE url_key <> ''")}
-    except Exception:                                   # noqa: BLE001  (catalogue not loaded yet)
+    except Exception as e:                              # noqa: BLE001  (catalogue not loaded yet)
+        if not core.missing_table(e):
+            raise
         return {}
 
 
+def _year_earlier(d):
+    try:
+        return d.replace(year=d.year - 1)
+    except ValueError:                                  # 29 February
+        return d.replace(year=d.year - 1, day=28)
+
+
 def load(first, last):
-    """Google Analytics rows for months first..last ('yyyy_MM') and a year earlier, plus the store's order counts."""
+    """Google Analytics rows for months first..last ('yyyy_MM') and a year earlier, plus the store's order counts.
+    When the period ends in the newest month Houston holds, both years stop at the same day (cut), as on the
+    Sales pages, so a month still in progress isn't compared with a whole month."""
     st = status()
     months = sales.month_range(first, last)
     before = [wm.month_add(m, -12) for m in months]
-    days = lambda ms: (f"{ms[0][:4]}-{ms[0][5:]}-01", f"{ms[-1][:4]}-{ms[-1][5:]}-31")  # noqa: E731
+    cut = st["last_day"] if st and last == st["last"] else None
+
+    def days(ms, end=None):
+        return f"{ms[0][:4]}-{ms[0][5:]}-01", (end.isoformat() if end else f"{ms[-1][:4]}-{ms[-1][5:]}-31")
+    spans = {"now": days(months, cut), "before": days(before, _year_earlier(cut) if cut else None)}
     with closing(core.connect()) as c:
         frames = []
-        for period, ms in (("now", months), ("before", before)):
-            a, b = days(ms)
+        for period in ("now", "before"):
+            a, b = spans[period]
             frames.append(pd.read_sql_query(
                 "SELECT date, channel, landing_page AS page, SUM(engaged_sessions) AS visits, "
                 "SUM(sessions) AS sessions, SUM(purchases) AS orders, SUM(revenue) AS revenue FROM ga4_landing "
@@ -58,11 +75,13 @@ def load(first, last):
             frames[-1]["store_orders"] = 0
         store = {}
         try:
-            for period, ms in (("now", months), ("before", before)):
-                a, b = days(ms)
+            for period in ("now", "before"):
+                a, b = spans[period]
                 store[period] = c.execute("SELECT COUNT(*) FROM mg_orders WHERE status IN ('complete', 'closed') "
                                           "AND placed_on BETWEEN ? AND ?", (a, b)).fetchone()[0]
-        except Exception:                               # noqa: BLE001  (no store orders pulled yet)
+        except Exception as e:                          # noqa: BLE001  (no store orders pulled yet)
+            if not core.missing_table(e):
+                raise
             store = {"now": 0, "before": 0}
         pages = _pages(c)
     rows = pd.concat(frames, ignore_index=True)
@@ -70,7 +89,7 @@ def load(first, last):
     rows["channel"] = rows["channel"].fillna("(not set)")
     comparable = bool(st) and before[0] >= st["first"]
     return {"months": months, "before": before, "rows": rows, "store": store, "pages": pages,
-            "comparable": comparable}
+            "comparable": comparable, "cut": cut}
 
 
 def totals(data):

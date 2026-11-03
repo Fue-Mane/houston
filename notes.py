@@ -124,11 +124,14 @@ def table():
 
 
 def save(df):
-    """Write the editor's rows back: changed rows are updated, new rows added, missing rows deleted."""
-    rows = []
+    """Write the editor's rows back: changed rows are updated, new rows added, deleted rows deleted. A stored note
+    whose date or text was cleared is kept unchanged rather than deleted. Returns (saved, kept unchanged)."""
+    rows, blank = [], []
     for r in df.to_dict("records"):
         day, note = r.get("day"), str(r.get("note") or "").strip()
         if not day or not note or pd.isna(day):
+            if not pd.isna(r.get("id")):
+                blank.append(int(r["id"]))
             continue
         ch = r.get("channel") or ALL
         rows.append((None if pd.isna(r.get("id")) else int(r["id"]),
@@ -138,7 +141,7 @@ def save(df):
                      r.get("source") if isinstance(r.get("source"), str) and r.get("source") else "manual",
                      r.get("ref") if isinstance(r.get("ref"), str) else ""))
     with closing(connect()) as c, c:
-        keep = [r[0] for r in rows if r[0] is not None]
+        keep = [r[0] for r in rows if r[0] is not None] + blank
         if keep:
             c.execute(f"DELETE FROM chart_notes WHERE id NOT IN ({','.join('?' * len(keep))})", keep)
         else:
@@ -150,4 +153,4 @@ def save(df):
             else:
                 c.execute("UPDATE chart_notes SET day = ?, kind = ?, channel = ?, note = ? WHERE id = ?",
                           (day, kind, ch, note, rid))
-    return len(rows)
+    return len(rows), len(blank)

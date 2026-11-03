@@ -98,7 +98,7 @@ CHECKS.append(channels.CHECK)
 GROUPS = ["Stock", "Matching", "EAN", "Suppliers and activity", channels.CHECK["group"]]
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS health_products (sku TEXT PRIMARY KEY, raw_sku TEXT, name TEXT, online_in_stock INTEGER,
+CREATE TABLE IF NOT EXISTS health_products (sku TEXT, raw_sku TEXT PRIMARY KEY, name TEXT, online_in_stock INTEGER,
     online_price REAL, magento_ean TEXT, producer TEXT, match TEXT, pack_of INTEGER, wm_code TEXT, wm_name TEXT,
     wm_ean TEXT, ean TEXT, stock REAL, supplier TEXT, last_delivery TEXT, sold_recent REAL, built_at TEXT);
 CREATE TABLE IF NOT EXISTS health_issues (check_id TEXT, sku TEXT, product TEXT, detail TEXT, found_at TEXT);
@@ -146,8 +146,7 @@ def _company_key(name):
 
 
 def _months_label(months):
-    def lab(m):
-        return datetime.date(int(m[:4]), int(m[5:]), 1).strftime("%b %Y")
+    lab = wm.month_label
     return lab(months[0]) if len(months) == 1 else f"{lab(months[0])} to {lab(months[-1])}"
 
 
@@ -304,6 +303,10 @@ def rebuild(source="manual"):
         found = _checks(rows, wmc)
         found += channels.rebuild_quietly(c, run_at)
         found += channel_units.rebuild_quietly(c)          # units per product, month and channel
+        pk = [r[1] for r in c.execute("PRAGMA table_info(health_products)") if r[5]]
+        if pk != ["raw_sku"]:       # keyed by the trimmed SKU before: two SKUs differing by a space were merged
+            c.execute("DROP TABLE health_products")
+            c.executescript(SCHEMA)
         c.execute("DELETE FROM health_products")
         c.executemany(f"INSERT OR REPLACE INTO health_products VALUES ({','.join('?' * len(PRODUCT_COLS))})",
                       [tuple(run_at if k == "built_at" else r.get(k) for k in PRODUCT_COLS) for r in rows])

@@ -11,10 +11,6 @@ import orders
 import winmentor as wm
 
 
-def _month_label(m):
-    return datetime.date(int(m[:4]), int(m[5:]), 1).strftime("%b %Y")
-
-
 def _signin_or_stop():
     state = wm.status_signin()
     if state == "no_client":
@@ -292,7 +288,7 @@ def page_orders():
     eff = [links.get(r["ean"], (r["ean"], 1.0))[0] for r in rows]
     sales, missing = wm.window_sales(eff, months)
     if missing:
-        st.warning("No sales list loaded yet for " + ", ".join(_month_label(m) for m in missing) +
+        st.warning("No sales list loaded yet for " + ", ".join(wm.month_label(m) for m in missing) +
                    ": those months count as 0. Update on the WinMENTOR page.")
     sugg = orders.suggest(rows, stock, sales, months, known=set(products), links=links)
     names = wm.magento_names(list(products) + [r["wm_ean"] for r in sugg])
@@ -301,7 +297,7 @@ def page_orders():
         st.caption("The file already had quantities in the order column (a previous order). Houston replaces them.")
 
     unit = lay["order_unit"]
-    mcols = [f"Sold {_month_label(m)}" for m in months]
+    mcols = [f"Sold {wm.month_label(m)}" for m in months]
     shown = [r for r in sugg if r["found"] or not hide]
     df = pd.DataFrame([{"open": False, "row": r["row"], "ean": r["ean"], "product": r["name"],
                         "magento": names.get(r["wm_ean"], ""), "stock": r["stock"], **dict(zip(mcols, r["sold"])),

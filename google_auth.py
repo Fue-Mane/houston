@@ -84,3 +84,27 @@ def execute(request, what, attempts=6, sleep=None, give_up=lambda e: False):
                 sleep(min(60, 5 * 2 ** attempt))
                 continue
             raise GoogleError(f"{what} API error{f' {code}' if code else ''}: {e}") from None
+
+
+# --- shared by the Search Console and Analytics pulls ---------------------------
+def month_chunks(start, end):
+    """[(first day, last day)] per calendar month from start to end, both dates included."""
+    import datetime
+    out, cur = [], start
+    while cur <= end:
+        nxt = (cur.replace(day=1) + datetime.timedelta(days=32)).replace(day=1)
+        out.append((cur, min(end, nxt - datetime.timedelta(days=1))))
+        cur = nxt
+    return out
+
+
+def missing_ranges(table, prop):
+    """Runs of dates with no stored rows in table, between its first and last stored day: [(from, to, days)]."""
+    import datetime
+    from contextlib import closing
+    import core
+    with closing(core.connect()) as c:
+        days = [datetime.date.fromisoformat(r[0]) for r in
+                c.execute(f"SELECT date FROM {table} WHERE property = ? ORDER BY date", (prop,))]
+    return [(a + datetime.timedelta(days=1), b - datetime.timedelta(days=1), (b - a).days - 1)
+            for a, b in zip(days, days[1:]) if (b - a).days > 1]

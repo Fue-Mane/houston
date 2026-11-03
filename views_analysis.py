@@ -32,12 +32,12 @@ def open_product_page(sku):
 
 
 # --- Overview ------------------------------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=8)
 def _products(prop, start, end, version):
     return analysis.products(prop, start, end)
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=8)
 def _searches(prop, start, end, version):
     return analysis.searches(prop, start, end)
 
@@ -49,7 +49,9 @@ def _version():
         b = c.execute("SELECT value FROM meta WHERE key = 'loaded_at'").fetchone()
         try:
             h = c.execute("SELECT MAX(run_at) FROM health_runs").fetchone()[0]
-        except Exception:                                  # noqa: BLE001  (no pre-flight run yet)
+        except Exception as e:                             # noqa: BLE001  (no pre-flight run yet)
+            if not core.missing_table(e):
+                raise
             h = ""
     return f"{a}|{(b or [''])[0]}|{h}"
 

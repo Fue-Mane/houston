@@ -21,22 +21,15 @@ from contextlib import closing
 import pandas as pd
 
 import channels
+import core
 import winmentor as wm
 
 NOT_ON_WEBSITE = "(not on the website)"
 NO_SUPPLIER = "(no delivery found)"
 
 
-def month_range(first, last):
-    out, m = [], first
-    while m <= last:
-        out.append(m)
-        m = wm.month_add(m, 1)
-    return out
-
-
-def label(month):
-    return datetime.date(int(month[:4]), int(month[5:]), 1).strftime("%b %Y")
+month_range = wm.month_range
+label = wm.month_label
 
 
 def status():
@@ -68,8 +61,10 @@ def _lists(c):
                 "SELECT h.wm_code, h.sku, h.name, v.value FROM health_products h LEFT JOIN product_values v "
                 "ON v.sku = h.raw_sku AND v.code = 'c2c_length' WHERE h.wm_code <> ''"):
             web.setdefault(code, (sku, name or "", (brand or "").strip() or NOT_ON_WEBSITE))
-    except Exception:                               # noqa: BLE001  (no product list yet)
-        pass
+    except Exception as e:                          # noqa: BLE001  (no product list yet)
+        if not core.missing_table(e):
+            raise
+        web = {}
     last = {}
     for code, supplier, d in c.execute("SELECT TRIM(c8), TRIM(c4), c3 FROM wm_receptions"):
         parts = (d or "").strip().split(".")

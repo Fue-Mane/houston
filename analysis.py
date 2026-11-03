@@ -83,7 +83,9 @@ def recent_months(n=3):
     with closing(core.connect()) as c:
         try:
             last = c.execute("SELECT MAX(month) FROM sales_units WHERE channel = 'Website'").fetchone()[0]
-        except Exception:                                 # noqa: BLE001  (channels not built yet)
+        except Exception as e:                            # noqa: BLE001  (channels not built yet)
+            if not core.missing_table(e):
+                raise
             return []
     if not last:
         return []
@@ -114,7 +116,9 @@ def website_units(months):
             return {(code or "").strip(): qty or 0 for code, qty in c.execute(
                 f"SELECT code, SUM(qty) FROM sales_units WHERE channel = 'Website' AND month IN "
                 f"({','.join('?' * len(months))}) GROUP BY code", months)}
-        except Exception:                                 # noqa: BLE001  (channels not built yet)
+        except Exception as e:                            # noqa: BLE001  (channels not built yet)
+            if not core.missing_table(e):
+                raise
             return {}
 
 
@@ -126,7 +130,9 @@ def products(prop, start, end):
         try:
             hp = {sku: (wm, stock, online, pack) for sku, wm, stock, online, pack in c.execute(
                 "SELECT sku, wm_code, stock, online_in_stock, pack_of FROM health_products")}
-        except Exception:                                 # noqa: BLE001  (no pre-flight run yet)
+        except Exception as e:                            # noqa: BLE001  (no pre-flight run yet)
+            if not core.missing_table(e):
+                raise
             hp = {}
     search = sd.per_product(prop, start.isoformat(), end.isoformat(), {s: {"url_key": k} for s, (_, k) in cat.items()})
     months = recent_months()

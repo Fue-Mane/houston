@@ -148,6 +148,11 @@ def db_path():
     return DATA / "houston.db"
 
 
+def missing_table(e):
+    """True only for 'table not built yet', so real database errors still surface."""
+    return isinstance(e, sqlite3.OperationalError) and "no such table" in str(e)
+
+
 def connect():
     path = db_path()
     if READ_ONLY:
@@ -660,8 +665,12 @@ def flat_categories(tree):
 
 
 # --- checks --------------------------------------------------------------------
+_ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
+
+
 def invisible(text):
-    return sum(1 for ch in str(text) if (ord(ch) < 32 and ch not in "\n\r\t") or 127 <= ord(ch) < 160)
+    return sum(1 for ch in str(text)
+               if (ord(ch) < 32 and ch not in "\n\r\t") or 127 <= ord(ch) < 160 or ch in _ZERO_WIDTH)
 
 
 def check(ch, attrs=None):
@@ -684,6 +693,8 @@ def check(ch, attrs=None):
             float(str(new))
         except ValueError:
             return "Blocked", "not a number"
+    if kind == "stock" and field == "is_in_stock" and str(new) not in ("0", "1", ""):
+        return "Blocked", "must be 0 or 1"
     if field in TEXT_FIELDS_LAPTE and re.search(r"\blapte\b", str(new), re.I):
         return "Warning", "contains 'lapte' — not allowed for plant-based drinks"
     if kind in ("product", "category") and old != "" and new == "":
@@ -763,87 +774,109 @@ def push(mg, cache, changes, progress=lambda f, t: None):
 
     pending_by_id = {p["id"]: p for p in load_pending()}
     skus = list(by_sku)
-    for batch in chunks(skus, PUSH_BATCH):
-        codes = {s: ((cache or {}).get("set_attributes", {}).get(products.get(s, {}).get("_set", ""), [])
-                     or [c["field"] for c in by_sku[s]]) for s in batch}
-        befores = mg.multi([("catalog_product.info", [s, "0", codes[s], "sku"]) for s in batch])
-        to_write = {}
-        for s, before in zip(batch, befores):
-            if isinstance(before, Exception):
-                results += [(c, "Failed", str(before)) for c in by_sku[s]]
-                continue
-            before = {k: norm(v) for k, v in before.items()}
-            backup["products"][s] = before
-            ok_changes = []
-            for c in by_sku[s]:
-                a = attrs.get(c["field"], {})
-                if not _same(before.get(c["field"]), c["old"], a):
-                    now_val = before.get(c["field"], "")
-                    results.append((c, "Skipped", f"changed in the store since your copy: now {now_val!r}. "
-                                                  "Review it again before pushing"))
-                    p = pending_by_id.get(c["id"])
-                    if p:
-                        p["old"] = now_val
-                        p.setdefault("extra", {})["old_label"] = option_label(a, now_val)
+    stopped = None
+    try:
+        for batch in chunks(skus, PUSH_BATCH):
+            mark = len(results)
+            try:
+                codes = {s: ((cache or {}).get("set_attributes", {}).get(products.get(s, {}).get("_set", ""), [])
+                             or [c["field"] for c in by_sku[s]]) for s in batch}
+                befores = mg.multi([("catalog_product.info", [s, "0", codes[s], "sku"]) for s in batch])
+                to_write = {}
+                for s, before in zip(batch, befores):
+                    if isinstance(before, Exception):
+                        results += [(c, "Failed", str(before)) for c in by_sku[s]]
+                        continue
+                    before = {k: norm(v) for k, v in before.items()}
+                    backup["products"][s] = before
+                    ok_changes = []
+                    for c in by_sku[s]:
+                        a = attrs.get(c["field"], {})
+                        if not _same(before.get(c["field"]), c["old"], a):
+                            now_val = before.get(c["field"], "")
+                            results.append((c, "Skipped", f"changed in the store since your copy: now {now_val!r}. "
+                                                          "Review it again before pushing"))
+                            p = pending_by_id.get(c["id"])
+                            if p:
+                                p["old"] = now_val
+                                p.setdefault("extra", {})["old_label"] = option_label(a, now_val)
+                            if s in products:
+                                products[s][c["field"]] = now_val
+                        else:
+                            ok_changes.append(c)
+                    if ok_changes:
+                        to_write[s] = (before, ok_changes)
+                _write_json(BACKUPS / f"push_{stamp}.json", backup)
+                if not to_write:
+                    done += len(batch)
+                    progress(done / max(total, 1), f"Pushed {done} of {total}")
+                    continue
+                order = list(to_write)
+                writes = mg.multi([("catalog_product.update", [s, {c["field"]: _api_value(c, attrs) for c in to_write[s][1]}, "0", "sku"])
+                                   for s in order])
+                written = [s for s, w in zip(order, writes) if not isinstance(w, Exception)]
+                for s, w in zip(order, writes):
+                    if isinstance(w, Exception):
+                        results += [(c, "Failed", str(w)) for c in to_write[s][1]]
+                afters = mg.multi([("catalog_product.info", [s, "0", codes[s], "sku"]) for s in written]) if written else []
+                for s, after in zip(written, afters):
+                    before, group = to_write[s]
+                    if isinstance(after, Exception):
+                        results += [(c, "Check", f"written, but reading it back failed: {after}") for c in group]
+                        continue
+                    after = {k: norm(v) for k, v in after.items()}
+                    changed = {c["field"] for c in group}
+                    surprises = [k for k in set(before) | set(after)
+                                 if k not in changed and k not in IGNORE_ON_COMPARE and before.get(k) != after.get(k)
+                                 and not (k.endswith("_label") and before.get(k, "").strip() == "" and after.get(k, "") == "")]
+                    for c in group:
+                        ok = _same(after.get(c["field"]), c["new"], attrs.get(c["field"], {}))
+                        status = "Done" if ok and not surprises else ("Check" if ok else "Failed")
+                        note = "" if ok else f"store now shows {after.get(c['field'])!r}"
+                        if surprises:
+                            note = (note + "; " if note else "") + "also changed: " + ", ".join(sorted(surprises))
+                        results.append((c, status, note))
                     if s in products:
-                        products[s][c["field"]] = now_val
-                else:
-                    ok_changes.append(c)
-            if ok_changes:
-                to_write[s] = (before, ok_changes)
-        _write_json(BACKUPS / f"push_{stamp}.json", backup)
-        if not to_write:
-            done += len(batch)
-            progress(done / max(total, 1), f"Pushed {done} of {total}")
-            continue
-        order = list(to_write)
-        writes = mg.multi([("catalog_product.update", [s, {c["field"]: _api_value(c, attrs) for c in to_write[s][1]}, "0", "sku"])
-                           for s in order])
-        written = [s for s, w in zip(order, writes) if not isinstance(w, Exception)]
-        for s, w in zip(order, writes):
-            if isinstance(w, Exception):
-                results += [(c, "Failed", str(w)) for c in to_write[s][1]]
-        afters = mg.multi([("catalog_product.info", [s, "0", codes[s], "sku"]) for s in written]) if written else []
-        for s, after in zip(written, afters):
-            before, group = to_write[s]
-            if isinstance(after, Exception):
-                results += [(c, "Check", f"written, but reading it back failed: {after}") for c in group]
-                continue
-            after = {k: norm(v) for k, v in after.items()}
-            changed = {c["field"] for c in group}
-            surprises = [k for k in set(before) | set(after)
-                         if k not in changed and k not in IGNORE_ON_COMPARE and before.get(k) != after.get(k)
-                         and not (k.endswith("_label") and before.get(k, "").strip() == "" and after.get(k, "") == "")]
-            for c in group:
-                ok = _same(after.get(c["field"]), c["new"], attrs.get(c["field"], {}))
-                status = "Done" if ok and not surprises else ("Check" if ok else "Failed")
-                note = "" if ok else f"store now shows {after.get(c['field'])!r}"
-                if surprises:
-                    note = (note + "; " if note else "") + "also changed: " + ", ".join(sorted(surprises))
+                        products[s].update(after)
+                done += len(batch)
+                progress(done / max(total, 1), f"Pushed {done} of {total}")
+            except Exception as e:                         # noqa: BLE001  (stop the push, keep what was done)
+                stopped = f"push stopped: {type(e).__name__}: {e}"
+                seen = {c["id"] for c, _, _ in results[mark:]}
+                results += [(c, "Failed", stopped) for s in batch for c in by_sku[s] if c["id"] not in seen]
+                break
+
+        if stopped is None:
+            for c in others:
+                try:
+                    status, note = _push_other(mg, cache, c, backup, stamp)
+                except ApiError as e:                      # the store refused this one change: carry on
+                    status, note = "Failed", str(e)
+                except Exception as e:                     # noqa: BLE001  (anything else: stop)
+                    stopped = f"push stopped: {type(e).__name__}: {e}"
+                    results.append((c, "Failed", stopped))
+                    break
                 results.append((c, status, note))
-            if s in products:
-                products[s].update(after)
-        done += len(batch)
-        progress(done / max(total, 1), f"Pushed {done} of {total}")
+                done += 1
+                progress(done / max(total, 1), f"Pushed {done} of {total}")
+    finally:
+        if stopped:
+            tried = {c["id"] for c, _, _ in results}
+            results += [(c, "Not pushed", "push stopped before this change") for c in changes if c["id"] not in tried]
+        _record_push(results, stamp, pending_by_id, cache)
+    return results
 
-    for c in others:
-        try:
-            status, note = _push_other(mg, cache, c, backup, stamp)
-        except ApiError as e:
-            status, note = "Failed", str(e)
-        results.append((c, status, note))
-        done += 1
-        progress(done / max(total, 1), f"Pushed {done} of {total}")
 
+def _record_push(results, stamp, pending_by_id, cache):
+    """Log every attempted change and drop finished ones from the queue. Runs even when a push stops early."""
     for c, status, note in results:
-        if status != "Skipped":
+        if status not in ("Skipped", "Not pushed"):
             _append_log({**c, "pushed_at": now(), "status": status, "note": note, "backup": f"push_{stamp}.json"})
-    pushed_ids = {c["id"] for c, s, _ in results if s not in ("Failed", "Skipped")}
+    pushed_ids = {c["id"] for c, s, _ in results if s not in ("Failed", "Skipped", "Not pushed")}
     save_pending([p for p in pending_by_id.values() if p["id"] not in pushed_ids] +
                  [p for p in load_pending() if p["id"] not in pending_by_id])
     if cache:
         save_cache(cache)
-    return results
 
 
 def _api_value(c, attrs):

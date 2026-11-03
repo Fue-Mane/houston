@@ -21,6 +21,7 @@ GROUPS = {
     "Prices": ["price", "special_price", "special_from_date", "special_to_date", "cost"],
 }
 LINK_TYPES = {"related": "Related products", "up_sell": "Up-sells", "cross_sell": "Cross-sells"}
+IMAGE_ROLES = ["image", "small_image", "thumbnail"]
 GOOGLE_SEARCH_CONSOLE = ('<span style="color:#FBBC05">Googl</span><span style="color:#EA4335">e</span> '
                          '<span style="color:#34A853">Search</span> '
                          '<span style="color:#4285F4">Console</span>')
@@ -208,7 +209,7 @@ def attr_widget(a, value, key):
 
 
 def product_filters(c, key, search_options=None, show_status=True):
-    prods, attrs = c["products"], c["attributes"]
+    prods = c["products"]
     cats = core.flat_categories(c.get("tree") or {})
     filters = st.columns(3 if show_status else 2)
     f1 = filters[0]
@@ -467,12 +468,13 @@ def images_tab(sku, rec):
             if m.get("url"):
                 a.image(m["url"], width=110)
             label = b.text_input("Label", core.norm(m.get("label")), key=f"il_{sku}_{i}")
-            types = b.multiselect("Used as", ["image", "small_image", "thumbnail"], default=[t for t in m.get("types") or []
-                                  if t in ("image", "small_image", "thumbnail")], key=f"it_{sku}_{i}")
+            other_roles = [t for t in m.get("types") or [] if t not in IMAGE_ROLES]   # kept: not editable here
+            types = b.multiselect("Used as", IMAGE_ROLES, default=[t for t in m.get("types") or []
+                                  if t in IMAGE_ROLES], key=f"it_{sku}_{i}")
             hide = b.checkbox("Hidden on product page", core.norm(m.get("exclude")) == "1", key=f"ie_{sku}_{i}")
             remove = b.checkbox("Remove this image", key=f"ir_{sku}_{i}")
             old = {"label": core.norm(m.get("label")), "types": sorted(m.get("types") or []), "exclude": core.norm(m.get("exclude")) or "0"}
-            new = {"label": label, "types": sorted(types), "exclude": "1" if hide else "0"}
+            new = {"label": label, "types": sorted(types + other_roles), "exclude": "1" if hide else "0"}
             if remove:
                 edits.append(core.new_change("image_remove", sku, "image", m.get("file", ""), "", rec.get("name", ""),
                                              file=m.get("file"), key=m.get("file")))
@@ -527,8 +529,16 @@ def related_tab(c, sku, rec):
             add = st.text_input("Add SKUs, separated by commas", key=f"la_{ltype}_{sku}")
             if st.form_submit_button("Add to review"):
                 ch = [core.new_change("link_remove", sku, ltype, s, "", rec.get("name", ""), key=s) for s in remove]
-                ch += [core.new_change("link_add", sku, ltype, "", s.strip(), rec.get("name", ""), key=s.strip())
-                       for s in add.split(",") if s.strip() and s.strip() not in linked]
+                missing = []
+                for s in dict.fromkeys(x.strip() for x in add.split(",")):
+                    if not s or s in linked:
+                        continue
+                    if s not in names:
+                        missing.append(s)
+                        continue
+                    ch.append(core.new_change("link_add", sku, ltype, "", s, rec.get("name", ""), key=s))
+                for s in missing:
+                    st.error(f"SKU {s!r} not found in the loaded catalogue")
                 st.success(f"{core.queue(ch)} changes added to Review and push.") if ch else st.info("No changes.")
 
 
@@ -903,6 +913,18 @@ def page_google_search_console():
                     f"If {google_label('search_console')} shows them as processing, try again a day later.",
                     unsafe_allow_html=True)
         if st.button(f"Try again for {gap_start} to {gap_end}", key=f"gap_{gap_start}"):
+            bar = st.progress(0.0, "Starting")
+            try:
+                res = g.pull(prop, start=gap_start, end=gap_end, progress=lambda f, t: bar.progress(min(float(f), 1.0), t))
+                st.success(f"Pulled {res['start']} to {res['end']}: " +
+                           ", ".join(f"{n2:,} rows into {t}" for t, n2 in res["rows"].items()))
+                st.rerun()
+            except g.GoogleError as e:
+                st.error(str(e))
+    for gap_start, gap_end, n in g.incomplete_ranges(prop):
+        st.markdown(f"Site totals are stored for {gap_start} to {gap_end} ({n} days), but the per-page and per-search "
+                    "figures aren't: an earlier update stopped partway. Product search figures for these days are missing.")
+        if st.button(f"Fetch the missing detail for {gap_start} to {gap_end}", key=f"inc_{gap_start}"):
             bar = st.progress(0.0, "Starting")
             try:
                 res = g.pull(prop, start=gap_start, end=gap_end, progress=lambda f, t: bar.progress(min(float(f), 1.0), t))

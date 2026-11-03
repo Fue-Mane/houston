@@ -161,6 +161,20 @@ def month_add(month, k):
     return f"{i // 12:04d}_{i % 12 + 1:02d}"
 
 
+def month_range(first, last):
+    """Every 'yyyy_MM' month from first to last, both included."""
+    out, m = [], first
+    while m <= last:
+        out.append(m)
+        m = month_add(m, 1)
+    return out
+
+
+def month_label(month):
+    """'2026_10' -> 'Oct 2026'."""
+    return datetime.date(int(month[:4]), int(month[5:]), 1).strftime("%b %Y")
+
+
 def full_months_before(today, n):
     """The n full months before today's month, oldest first: 22 Oct 2026, 3 -> 2026_07, 2026_08, 2026_09."""
     cur = f"{today.year:04d}_{today.month:02d}"
@@ -561,7 +575,9 @@ def magento_names(eans):
         try:
             rows = c.execute("SELECT v.value, p.name, p.status FROM product_values v JOIN products p ON p.sku = v.sku "
                              "WHERE v.code = 'c2c_cod_ean' AND TRIM(v.value) <> ''").fetchall()
-        except Exception:
+        except Exception as e:
+            if not core.missing_table(e):
+                raise
             return out                                     # no catalogue copy in this database
     wanted = set(eans)
     for raw, name, st in sorted(rows, key=lambda r: r[2] != "1"):

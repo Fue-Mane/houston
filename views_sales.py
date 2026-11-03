@@ -25,7 +25,7 @@ UNITS = st.column_config.NumberColumn(format="%,.0f")
 PCT = st.column_config.NumberColumn(format="%+,.0f%%")
 
 
-@st.cache_data(show_spinner="Adding up the sales")
+@st.cache_data(show_spinner="Adding up the sales", max_entries=16)
 def _load(first, last, chans, version):          # version: rebuilt channels give a fresh result
     return sales.load(first, last, list(chans) if chans else None)
 
@@ -273,7 +273,7 @@ def _bundles(first, last, chans, info, where):
                "on the product pages.")
 
 
-@st.cache_data(show_spinner="Finding products bought together")
+@st.cache_data(show_spinner="Finding products bought together", max_entries=8)
 def _load_bundles(first, last, chans, version):
     return sales.bundles(first, last, list(chans))
 
@@ -314,7 +314,11 @@ def notes_editor(key):
                            "note": st.column_config.TextColumn("Note", required=True, width="large")})
         a, b, _ = st.columns([1, 1, 2])
         if a.button("Save notes", key=key + "_notes_save", use_container_width=True):
-            st.success(f"{notes.save(edited)} notes saved.")
+            saved, kept = notes.save(edited)
+            st.success(f"{saved} notes saved.")
+            if kept:
+                st.warning(f"{kept} note{'s' if kept != 1 else ''} with the text cleared kept as before. To delete a "
+                           "note, select its row and delete the row.")
         if b.button("Get new Google updates", key=key + "_notes_google", use_container_width=True):
             try:
                 n = notes.update_google()

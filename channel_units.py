@@ -90,14 +90,6 @@ def per_month(e):
     return out
 
 
-def _months(first, last):
-    out, m = [], first
-    while m <= last:
-        out.append(m)
-        m = wm.month_add(m, 1)
-    return out
-
-
 def chart(e, series):
     """The units-sold chart: the All sales line as before, plus one line per channel in SHOWN. Pointing at the
     chart shows a vertical line at the nearest month, with every line's value for that month."""
@@ -108,7 +100,7 @@ def chart(e, series):
         got = (per or {}).get(ch)
         if not got:
             continue
-        months = _months(min(got), max(got))          # zero for months in between with no sale in this channel
+        months = wm.month_range(min(got), max(got))          # zero for months in between with no sale in this channel
         frames.append(pd.DataFrame({"month": months, "qty": [got.get(m, 0.0) for m in months], "series": ch}))
     df = pd.concat(frames, ignore_index=True)
     df["date"] = pd.to_datetime(df["month"].str.replace("_", "-") + "-01")

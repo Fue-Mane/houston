@@ -17,7 +17,7 @@ RATE = st.column_config.NumberColumn(format="%,.1f")
 PCT = st.column_config.NumberColumn(format="%+,.0f%%")
 
 
-@st.cache_data(show_spinner="Reading Google Analytics")
+@st.cache_data(show_spinner="Reading Google Analytics", max_entries=16)
 def _load(first, last, last_day):                 # last_day: a new pull gives a fresh result
     return marketing.load(first, last)
 
@@ -50,6 +50,8 @@ def traffic_sources():
         "engaged visits, which leaves out most bot traffic (Direct still has some in the worst months). Orders and "
         f"revenue (lei with VAT) are as Google Analytics credits them: it saw {t['now']['orders']:,.0f} orders in "
         f"these months, {seen} of the {t['now']['store']:,} the store recorded."
+        + (f" {sales.label(last)} is counted up to day {data['cut'].day} in both years, to match."
+           if data.get("cut") and data["comparable"] else "")
         + ("" if data["comparable"] else " No comparison with a year earlier: Houston's Google Analytics data "
                                           f"starts in {sales.label(info['first'])}."))
     c = data["comparable"]

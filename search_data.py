@@ -39,8 +39,10 @@ def window(prop, label):
 
 
 def gaps_inside(prop, start, end):
+    """Days in the window with no search data: none stored at all, or totals without the per-page detail."""
     import google_sc
-    return [(a, b, n) for a, b, n in google_sc.missing_ranges(prop) if a.isoformat() <= end and b.isoformat() >= start]
+    runs = sorted(google_sc.missing_ranges(prop) + google_sc.incomplete_ranges(prop))
+    return [(a, b, n) for a, b, n in runs if a.isoformat() <= end and b.isoformat() >= start]
 
 
 def per_product(prop, start, end, products):

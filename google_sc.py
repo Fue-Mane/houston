@@ -11,7 +11,6 @@ Three tables, all daily, all with the date each row was pulled:
 import datetime
 import time
 from contextlib import closing
-from pathlib import Path
 
 import core
 
@@ -56,13 +55,18 @@ def latest_date(prop):
     return row[0] if row and row[0] else None
 
 
-def _months(start, end):
-    out, cur = [], start
-    while cur <= end:
-        nxt = (cur.replace(day=1) + datetime.timedelta(days=32)).replace(day=1)
-        out.append((cur, min(end, nxt - datetime.timedelta(days=1))))
-        cur = nxt
-    return out
+def _table_resume(prop, table, today):
+    """3 days before the latest day stored in this table (Google can finalise late days later), or 16 months back.
+    Each table resumes from its own data, so a pull that stopped after the totals still fetches the detail."""
+    with closing(core.connect()) as c:
+        if table == "gsc_totals":
+            row = c.execute("SELECT MAX(date) FROM gsc_totals WHERE property = ?", (prop,)).fetchone()
+        else:
+            pid = c.execute("SELECT id FROM dict WHERE kind = 'property' AND value = ?", (prop,)).fetchone()
+            row = c.execute(f"SELECT MAX(date) FROM {table}_c WHERE prop = ?", pid).fetchone() if pid else None
+    if row and row[0]:
+        return datetime.date.fromisoformat(row[0]) - datetime.timedelta(days=3)
+    return today - datetime.timedelta(days=HISTORY_DAYS)
 
 
 def _fetch(svc, prop, start, end, dimensions):
@@ -80,50 +84,70 @@ def _fetch(svc, prop, start, end, dimensions):
 
 def pull(prop, start=None, end=None, progress=lambda f, t: None, svc=None):
     """Pull [start, end] into all three tables, replacing any rows already stored for those dates.
-    Default: the full 16 months the first time; afterwards from 3 days before the latest stored date."""
+    Default: the full 16 months the first time; afterwards each table from 3 days before its own latest stored date."""
     svc = svc or service()
     today = datetime.date.today()
     end = end or today - datetime.timedelta(days=1)
-    if start is None:
-        last = latest_date(prop)
-        start = (datetime.date.fromisoformat(last) - datetime.timedelta(days=3)) if last \
-            else today - datetime.timedelta(days=HISTORY_DAYS)
-    months = _months(start, end)
+    starts = {t: start or _table_resume(prop, t, today) for t in TABLES}
+    order = list(TABLES)
+    jobs = sorted((m_start, order.index(t), m_end, t) for t in TABLES
+                  for m_start, m_end in google_auth.month_chunks(starts[t], end))
     pulled_at, counts = core.now(), {t: 0 for t in TABLES}
-    steps, step = len(months) * len(TABLES), 0
-    for m_start, m_end in months:
-        for table, (dims, cols) in TABLES.items():
-            step += 1
-            progress(step / max(steps, 1), f"{table}: {m_start:%b %Y}")
-            rows = _fetch(svc, prop, m_start, m_end, dims)
-            with closing(core.connect()) as c, c:
-                if table == "gsc_totals":
-                    records = [(prop, *r["keys"], int(r.get("clicks", 0)), int(r.get("impressions", 0)),
-                                float(r.get("ctr", 0)), float(r.get("position", 0)), pulled_at) for r in rows]
-                    c.execute("DELETE FROM gsc_totals WHERE property = ? AND date BETWEEN ? AND ?",
-                              (prop, m_start.isoformat(), m_end.isoformat()))
-                    c.executemany(f"INSERT OR REPLACE INTO gsc_totals VALUES ({', '.join('?' * 7)})", records)
-                else:  # compact storage: see core.write_compact
-                    records = [dict(zip(dims, r["keys"]), clicks=int(r.get("clicks", 0)),
-                                    impressions=int(r.get("impressions", 0)), position=float(r.get("position", 0)))
-                               for r in rows]
-                    core.write_compact(c, table, prop, m_start.isoformat(), m_end.isoformat(), records)
-                c.execute("INSERT INTO gsc_pulls VALUES (?, ?, ?, ?, ?, ?)",
-                          (pulled_at, prop, table, m_start.isoformat(), m_end.isoformat(), len(records)))
-            counts[table] += len(records)
-    return {"start": start.isoformat(), "end": end.isoformat(), "rows": counts}
+    for step, (m_start, _, m_end, table) in enumerate(jobs, 1):
+        dims, cols = TABLES[table]
+        progress(step / max(len(jobs), 1), f"{table}: {m_start:%b %Y}")
+        rows = _fetch(svc, prop, m_start, m_end, dims)
+        with closing(core.connect()) as c, c:
+            if table == "gsc_totals":
+                records = [(prop, *r["keys"], int(r.get("clicks", 0)), int(r.get("impressions", 0)),
+                            float(r.get("ctr", 0)), float(r.get("position", 0)), pulled_at) for r in rows]
+                c.execute("DELETE FROM gsc_totals WHERE property = ? AND date BETWEEN ? AND ?",
+                          (prop, m_start.isoformat(), m_end.isoformat()))
+                c.executemany(f"INSERT OR REPLACE INTO gsc_totals VALUES ({', '.join('?' * 7)})", records)
+            else:  # compact storage: see core.write_compact
+                records = [dict(zip(dims, r["keys"]), clicks=int(r.get("clicks", 0)),
+                                impressions=int(r.get("impressions", 0)), position=float(r.get("position", 0)))
+                           for r in rows]
+                core.write_compact(c, table, prop, m_start.isoformat(), m_end.isoformat(), records)
+            c.execute("INSERT INTO gsc_pulls VALUES (?, ?, ?, ?, ?, ?)",
+                      (pulled_at, prop, table, m_start.isoformat(), m_end.isoformat(), len(records)))
+        counts[table] += len(records)
+    return {"start": min(min(starts.values()), end).isoformat(), "end": end.isoformat(), "rows": counts}
 
 
 def missing_ranges(prop):
     """Runs of dates with no stored rows, between the first and last stored day."""
+    return google_auth.missing_ranges("gsc_totals", prop)
+
+
+def incomplete_ranges(prop):
+    """Runs of days that have site totals but whose page or query detail was never pulled successfully
+    (a pull that stopped partway). Judged from gsc_pulls, which records only completed fetches; days before a
+    table's first recorded pull aren't judged. [(from, to, days)]."""
     with closing(core.connect()) as c:
-        days = [datetime.date.fromisoformat(r[0]) for r in
-                c.execute("SELECT date FROM gsc_totals WHERE property = ? ORDER BY date", (prop,))]
-    gaps = []
-    for a, b in zip(days, days[1:]):
-        if (b - a).days > 1:
-            gaps.append((a + datetime.timedelta(days=1), b - datetime.timedelta(days=1), (b - a).days - 1))
-    return gaps
+        days = [r[0] for r in c.execute("SELECT date FROM gsc_totals WHERE property = ? ORDER BY date", (prop,))]
+        spans = {t: c.execute("SELECT start_date, end_date FROM gsc_pulls WHERE property = ? AND table_name = ?",
+                              (prop, t)).fetchall() for t in ("gsc_pages", "gsc_queries")}
+    covered, first = {}, {}
+    for t, rows in spans.items():
+        if not rows:
+            continue
+        first[t] = min(a for a, _ in rows)
+        cov = covered[t] = set()
+        for a, b in rows:
+            d, stop = datetime.date.fromisoformat(a), datetime.date.fromisoformat(b)
+            while d <= stop:
+                cov.add(d.isoformat())
+                d += datetime.timedelta(days=1)
+    bad = [datetime.date.fromisoformat(d) for d in days
+           if any(d >= first[t] and d not in covered[t] for t in covered)]
+    runs = []
+    for d in bad:
+        if runs and (d - runs[-1][1]).days == 1:
+            runs[-1][1] = d
+        else:
+            runs.append([d, d])
+    return [(a, b, (b - a).days + 1) for a, b in runs]
 
 
 def totals(prop, start, end):
