@@ -5,19 +5,88 @@ st.set_page_config(page_title="Houston", page_icon="🚀", layout="wide")
 
 import core  # noqa: E402
 import views  # noqa: E402
+import views_health  # noqa: E402
+import views_orders  # noqa: E402
+import views_product_list  # noqa: E402
+import views_sales  # noqa: E402
+import views_marketing  # noqa: E402
+import views_analysis  # noqa: E402
+
+
+# --- light / dark switch (sidebar) -----------------------------------------------------------
+# Streamlit has no public way to change the theme while running, so this sets the theme options and reruns once.
+# The choice is saved in Houston's settings; .streamlit/config.toml only gives the starting theme.
+def _apply_theme():
+    want = "light" if (core.setting("theme") or "dark") == "light" else "dark"
+    if st.session_state.get("_theme") == want:
+        return
+    st.session_state["_theme"] = want
+    try:
+        from streamlit import config as st_config
+        st_config.set_option("theme.base", want)
+        st_config.set_option("theme.primaryColor", "#2fb36b")
+    except Exception:            # noqa: BLE001  (a Streamlit version without this: keep the theme it has)
+        return
+    st.rerun()                   # outside the try, so the rerun is never swallowed
+
+
+def _theme_switch():
+    dark = (core.setting("theme") or "dark") != "light"
+    if st.sidebar.toggle("Dark theme", value=dark, key="theme_toggle") != dark:
+        core.set_setting("theme", "dark" if not dark else "light")
+        st.rerun()
+
+
+_apply_theme()
 
 st.markdown("""<style>
-[data-testid="stNavSectionHeader"] {text-transform: uppercase; letter-spacing: .08em; font-size: .72rem;
-  font-weight: 700; opacity: .65; margin-top: .9rem;}
+[data-testid="stSidebarNav"] {padding-top: .35rem;}
+[data-testid="stNavSectionHeader"] {text-transform: uppercase; letter-spacing: .1em; font-size: .78rem;
+  font-weight: 800; opacity: .9; margin: .65rem .35rem .18rem; padding: .2rem .55rem;
+  border-left: 3px solid #6b7280; border-radius: 2px; color: inherit;}
+[data-testid="stNavSectionHeader"]:nth-of-type(3) {border-left-color: #4285F4;}
+[data-testid="stNavSectionHeader"]:nth-of-type(4) {border-left-color: #2fb36b;}
+[data-testid="stNavSectionHeader"]:nth-of-type(5) {border-left-color: #E37400;}
+[data-testid="stNavSectionHeader"]:nth-of-type(6) {border-left-color: #4285F4;}
+[data-testid="stNavSectionHeader"]:nth-of-type(7) {border-left-color: #8b8f98;}
+[data-testid="stSidebarNavLink"] {margin: 1px 0; padding: .25rem .7rem .25rem 1.25rem; border-radius: 6px;
+  transition: background .15s ease, border-color .15s ease;}
 [data-testid="stSidebarNavLink"] span {font-size: .95rem;}
+[data-testid="stSidebarNavLink"]:hover {background: rgba(127, 127, 127, .14);}
+[data-testid="stSidebarNavLink"][aria-current="page"] {background: rgba(47, 179, 107, .16);
+  border-left: 3px solid #2fb36b; padding-left: calc(1.25rem - 3px); font-weight: 650;}
 [data-testid="stSidebarNavLink"][href$="/review"] {background: #2fb36b; border-radius: 6px; margin: 4px 0;}
 [data-testid="stSidebarNavLink"][href$="/review"] span {color: #fff !important; font-weight: 600;}
+[data-testid="stSidebarNavLink"][href$="/google-search-console"] span {
+  background: linear-gradient(90deg, #FBBC05 0 30%, #EA4335 30% 38%, #34A853 38% 68%, #4285F4 68%);
+  -webkit-background-clip: text; background-clip: text; color: transparent !important;
+}
+[data-testid="stSidebarNavLink"][href$="/google-analytics"] span {
+  background: linear-gradient(90deg, #E37400, #F9AB00);
+  -webkit-background-clip: text; background-clip: text; color: transparent !important;
+}
+[data-testid="stSidebarNavLink"][href$="/google-ads"] span {
+  background: linear-gradient(90deg, #4285F4, #34A853, #FBBC05, #EA4335);
+  -webkit-background-clip: text; background-clip: text; color: transparent !important;
+}
 </style>""", unsafe_allow_html=True)
+views.compaction_gate()
 views.header()
 waiting = len(core.load_pending())
 pages = {
+    "Data": [
+        st.Page(views_health.page_health, title="Data health", url_path="data-health"),
+        st.Page(views_product_list.page_product_list, title="Product list", url_path="product-list"),
+    ],
     "": [st.Page(views.page_overview, title="Overview", default=True),
          st.Page(views.page_worklog, title="Work log", url_path="worklog")],
+    "Sales": views_sales.pages(),
+    "Marketing": [
+        st.Page(views.page_google_search_console, title="Google Search Console", url_path="google-search-console"),
+        st.Page(views_marketing.page_google_analytics, title="Google Analytics", url_path="google-analytics"),
+        st.Page(views.page_google_ads, title="Google Ads"),
+    ],
+    "Product Analysis": views_analysis.pages(),
     "Catalogue": [
         st.Page(views.page_products, title="Products"),
         st.Page(views.page_bulk, title="Bulk edit"),
@@ -26,13 +95,14 @@ pages = {
         st.Page(views.page_review, title=f"Review and push ({waiting})" if waiting else "Review and push", url_path="review"),
         st.Page(views.page_log, title="Change log"),
     ],
-    "Google": [
-        st.Page(views.page_google_search_console, title="Google Search Console", url_path="google-search-console"),
-        st.Page(views.page_google_analytics, title="Google Analytics", url_path="google-analytics"),
-        st.Page(views.page_google_ads, title="Google Ads"),
+    "Stock and orders": [
+        st.Page(views_orders.page_orders, title="Orders", url_path="orders"),
+        st.Page(views_orders.page_winmentor, title="WinMENTOR", url_path="winmentor"),
     ],
     "Store (later)": [st.Page(views.page_onsite_search, title="On-site search")],
 }
 page = st.navigation(pages)
 views.sidebar_connection()
+views.backup_box()
+_theme_switch()
 page.run()

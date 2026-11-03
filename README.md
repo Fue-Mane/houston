@@ -7,6 +7,7 @@ Start it from this folder in PowerShell:
 
 It opens in your browser. Enter the API key at the bottom of the left sidebar; the badge turns green when the store answers.
 
+- Houston starts in dark mode. To switch to white/light mode, open the top-right menu (⋮) → **Settings** → **Theme**. The choice is stored by Streamlit for this browser, and can be changed back to dark mode there.
 - Nothing is written to the store until you press Push on "Review and push".
 - Every push saves the old values in `data/backups`, reads each change back, and logs it in the change log.
 - The API key is never saved. Closing the browser tab disconnects.
@@ -48,3 +49,27 @@ One sign-in, as nicoleta@biomania.ro, covers Search Console and Google Analytics
 ## Google Analytics
 
 Houston → Google → Google Analytics → choose the GA4 property → **Pull 16 months**, then **Update from Google**. Data lands in `ga4_totals`, `ga4_landing`, `ga4_items` and `ga4_site_search`; every pull is recorded in `ga4_pulls`.
+
+
+## Storage (since 17 October 2026)
+
+Everything lives in one file, `data/houston.db` (SQLite). The three big Google tables are stored compactly:
+every page address, search, device, channel and property is stored once in `dict`, and the data rows
+(`gsc_pages_c`, `gsc_queries_c`, `ga4_landing_c`) point to it by number. Views with the old names
+(`gsc_pages`, `gsc_queries`, `ga4_landing`) give the familiar columns back, so pages and SQL work as before.
+`ctr` is calculated (clicks / impressions); the per-row pull time is gone (see `gsc_pulls`, `ga4_pulls`).
+
+The first start after this update reorganises an older database once, with a progress bar. Every table's
+totals are checked before its old version is removed, and a full copy is kept first as
+`data/houston-before-compaction.db`. Delete that copy after a few days if everything looks right.
+
+## Backup
+
+Sidebar → **Backup** → choose a folder inside Google Drive (e.g. `G:\My Drive\Houston backups`) → **Back up now**.
+Each backup is one zip: a clean snapshot of the database, `data/backups/`, `data/uploads/` and `notes/worklog.md`.
+`secrets/` is never included. Houston keeps the newest 8 zips in that folder. Don't put the live `data/`
+folder itself in Google Drive: Drive could copy the database halfway through a write.
+
+**Restore:** close Houston and the Claude app. Unzip the backup. Replace `data/houston.db` with the one from
+the zip and delete `data/houston.db-wal` and `data/houston.db-shm` if they exist. Copy back `data/backups/`,
+`data/uploads/` and `notes/worklog.md` if needed. Start Houston.

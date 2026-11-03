@@ -1,8 +1,12 @@
 """Houston pages. All writes go to the review queue first; only Review and push talks to the store."""
 import pandas as pd
+import datetime
+from pathlib import Path
+
 import streamlit as st
 
 import core
+import health
 from magento import ApiError, Magento
 
 URL = "https://www.biomania.ro/api/xmlrpc/"
@@ -17,6 +21,15 @@ GROUPS = {
     "Prices": ["price", "special_price", "special_from_date", "special_to_date", "cost"],
 }
 LINK_TYPES = {"related": "Related products", "up_sell": "Up-sells", "cross_sell": "Cross-sells"}
+GOOGLE_SEARCH_CONSOLE = ('<span style="color:#FBBC05">Googl</span><span style="color:#EA4335">e</span> '
+                         '<span style="color:#34A853">Search</span> '
+                         '<span style="color:#4285F4">Console</span>')
+GOOGLE_ANALYTICS = ('<span style="color:#E37400">Google</span> '
+                    '<span style="color:#F9AB00">Analytics</span>')
+
+
+def google_label(kind):
+    return GOOGLE_SEARCH_CONSOLE if kind == "search_console" else GOOGLE_ANALYTICS
 
 
 # --- shared ----------------------------------------------------------------------
@@ -49,6 +62,8 @@ def sidebar_connection():
             if c:
                 with st.expander(f"Catalogue copy · {c['loaded_at'][:16]}"):
                     load_controls("reload")
+            import views_channels
+            views_channels.orders_box(mg())
             if st.button("Disconnect"):
                 mg().logout()
                 del st.session_state["mg"]
@@ -72,6 +87,58 @@ def sidebar_connection():
                         st.error(str(e))
 
 
+def compaction_gate():
+    """Runs once: the three big Google tables move to compact storage, then the file shrinks."""
+    if core.setting("shrink_pending") == "1" and not core.needs_compaction():
+        with st.spinner("Shrinking the database file (a step that couldn't run last time)…"):
+            core.shrink()
+        return
+    if not core.needs_compaction():
+        return
+    st.header("One moment: making the database smaller")
+    st.write("Houston is reorganising its Google data so the database takes much less space. Nothing is deleted: "
+             "every total is checked before the old tables are removed, and a full copy of the old database is kept "
+             "first. This runs once and takes a few minutes. Don't close this tab.")
+    bar = st.progress(0.0)
+    try:
+        report = core.compact_now(lambda f, t: bar.progress(min(float(f), 1.0), text=t))
+    except Exception as e:
+        st.error(f"Stopped: {e}\n\nNothing was lost: every table is checked on its own, and the one that didn't match "
+                 "was left as it was. Houston can't pull Google data until this is solved: send this message to Claude.")
+        st.stop()
+    st.session_state.compaction = report
+    st.rerun()
+
+
+def backup_box():
+    last = core.last_backup()
+    age = None
+    if last:
+        age = (datetime.datetime.now() - datetime.datetime.strptime(last["at"], "%Y-%m-%d %H:%M:%S")).days
+    with st.sidebar:
+        if age is None or age >= 7:
+            st.caption("⚠️ " + ("No backup yet." if age is None else f"Last backup {age} days ago."))
+        with st.expander("Backup · never" if not last else f"Backup · {last['at'][:16]}"):
+            folder = st.text_input("Backup folder (inside Google Drive)",
+                                   core.setting("backup_dir") or core.guess_backup_dir(), key="bk_dir",
+                                   help="For example G:\\My Drive\\Houston backups. Houston creates the folder if needed.")
+            st.caption("Each backup is one zip: the database, push backups, uploads and the work log. "
+                       "Houston keeps the newest 8 there. Your Google login (secrets) is never included.")
+            if st.button("Back up now", key="bk_go", use_container_width=True):
+                if not folder.strip():
+                    st.error("Choose a folder first.")
+                else:
+                    try:
+                        with st.spinner("Making a clean copy and compressing it…"):
+                            r = core.backup_now(folder.strip())
+                        core.set_setting("backup_dir", folder.strip())
+                        st.success(f"Saved {Path(r['file']).name} ({r['mb']} MB).")
+                    except Exception as e:
+                        st.error(f"Backup failed: {e}")
+            if last:
+                st.caption(f"Last: {Path(last['file']).name}, {last['mb']} MB")
+
+
 def need_connection():
     if not mg():
         st.warning("Connect to the store first: enter the API key at the bottom of the left sidebar.")
@@ -87,6 +154,7 @@ def load_controls(key="load"):
         try:
             st.session_state.cache = core.load_catalogue(m, scope == "Live only",
                                                          lambda f, t: bar.progress(min(float(f), 1.0), t))
+            health.rebuild_quietly("Catalogue load")
             st.rerun()
         except ApiError as e:
             st.error(str(e))
@@ -139,16 +207,31 @@ def attr_widget(a, value, key):
     return out
 
 
-def product_filters(c, key):
+def product_filters(c, key, search_options=None, show_status=True):
     prods, attrs = c["products"], c["attributes"]
     cats = core.flat_categories(c.get("tree") or {})
-    f1, f2, f3 = st.columns([2, 1, 2])
+    filters = st.columns(3 if show_status else 2)
+    f1 = filters[0]
     q = f1.text_input("Search name or SKU", key=key + "_q").strip().lower()
-    status = f2.selectbox("Status", ["All", "Live", "Disabled"], key=key + "_st")
-    cat = f3.selectbox("Category", [None] + cats, key=key + "_cat",
+    if show_status:
+        status = filters[1].selectbox("Status", ["All", "Live", "Disabled"], key=key + "_st")
+    else:
+        status = "Live"
+    cat = filters[-1].selectbox("Category", [None] + cats, key=key + "_cat",
                        format_func=lambda x: "Any" if x is None else "\u2003" * max(x[2] - 1, 0) + x[1])
-    problems = st.multiselect("Show only products with", ["No meta description", "No meta title",
-                                                          "No short description", "No description"], key=key + "_pr")
+    if search_options is None:
+        problems = st.multiselect("Show only products with", ["No meta description", "No meta title",
+                                                              "No short description", "No description"], key=key + "_pr")
+    else:
+        problems_col, search_col = st.columns(2)
+        problems_col.markdown("**Show only products with**")
+        search_col.markdown(google_label("search_console"), unsafe_allow_html=True)
+        problems = problems_col.multiselect("Show only products with",
+                                            ["No meta description", "No meta title",
+                                             "No short description", "No description"], key=key + "_pr",
+                                            label_visibility="collapsed")
+        search_col.multiselect("Google Search Console", search_options, key=key + "_scols",
+                               label_visibility="collapsed")
     need = {"No meta description": "meta_description", "No meta title": "meta_title",
             "No short description": "short_description", "No description": "description"}
     out = []
@@ -170,6 +253,11 @@ def product_filters(c, key):
 # --- pages -----------------------------------------------------------------------
 def page_overview():
     st.header("Overview")
+    r = st.session_state.get("compaction")
+    if r and "after_mb" in r:
+        st.success(f"Database reorganised: {r['before_mb']} MB → {r['after_mb']} MB, every total checked. "
+                   "A full copy of the old database is in data/houston-before-compaction.db: "
+                   "delete it after a few days if everything looks right." + (f" {r['shrink']}" if r.get("shrink") else ""))
     st.info("Sales graphs and KPIs come here once they're defined.")
     c = cache()
     if c:
@@ -187,21 +275,23 @@ def page_products():
     c = need_cache()
     attrs, prods = c["attributes"], c["products"]
     st.header("Products")
-    skus = product_filters(c, "p")
+    jump = st.session_state.pop("open_in_catalogue", None)      # "Edit in Catalogue" on the product page
+    if jump in prods:
+        st.session_state["p_q"] = jump.strip()
+        st.session_state["p_open"] = jump
+    import search_data as sd
+    prop = sd.default_property()
+    skus = product_filters(c, "p", list(SEARCH_COLS) if prop else None, show_status=False)
     st.caption(f"{len(skus)} products · catalogue copy from {c['loaded_at']}")
 
     table_codes = sorted((k for k, a in attrs.items() if a.get("type") in EDITABLE_TYPES - {"multiselect"}
                           and k not in core.LOCKED_PRODUCT), key=lambda k: attrs[k].get("label", k).lower())
     default = [k for k in ("name", "meta_title", "meta_description") if k in attrs]
     cols = st.multiselect("Columns", table_codes, default=default, format_func=lambda k: alabel(attrs, k), key="p_cols")
-    import search_data as sd
-    prop = sd.default_property()
-    search_cols, search = [], {}
+    search_cols, search = st.session_state.get("p_scols", []), {}
     if prop:
-        s1, s2 = st.columns([3, 1])
-        search_cols = s1.multiselect("Search columns (from Search Console, read-only)", list(SEARCH_COLS), key="p_scols")
         if search_cols:
-            label = s2.selectbox("Search window", list(sd.WINDOWS), key="p_swin")
+            label = st.selectbox("Search window", list(sd.WINDOWS), key="p_swin")
             start, end = sd.window(prop, label)
             search = sd.per_product(prop, start, end, prods)
             st.caption(f"Search figures for {start} to {end}." +
@@ -245,8 +335,11 @@ def page_products():
     edited = st.data_editor(df, column_config=config, hide_index=True, key=table_key)
     ticked = [r["sku"] for _, r in edited.iterrows() if r["open"] and r["sku"] != opened]
     if ticked and ticked[0] in skus:
-        st.session_state.p_open = ticked[0]
-        st.rerun()
+        if ticked[0] != opened:
+            st.session_state.p_open = ticked[0]
+            import product_card
+            product_card.show(ticked[0])
+            return
     if st.button("Add table edits to review", type="primary"):
         changes, unmatched = [], []
         for (_, before), (_, after) in zip(df.iterrows(), edited.iterrows()):
@@ -323,14 +416,16 @@ def search_tab(sku, rec):
     import search_data as sd
     prop = sd.default_property()
     if not prop:
-        st.info("Connect Search Console first: Google → Google Search Console.")
+        st.markdown(f"Connect {google_label('search_console')} first: Google → {google_label('search_console')}.",
+                    unsafe_allow_html=True)
         return
     label = st.selectbox("Window", list(sd.WINDOWS), key=f"sw_{sku}")
     start, end = sd.window(prop, label)
     url = sd.page_urls(rec.get("url_key"))
     st.caption(f"Page: {url[0] if url else '(no URL key)'} · {start} to {end}")
     for a, b, n in sd.gaps_inside(prop, start, end):
-        st.warning(f"This window includes {n} days with no Search Console data ({a} to {b}).")
+        st.markdown(f"This window includes {n} days with no {google_label('search_console')} data ({a} to {b}).",
+                    unsafe_allow_html=True)
     day = sd.daily(prop, rec.get("url_key"), start, end)
     if day.empty:
         st.info("No search impressions for this page in this window.")
@@ -611,7 +706,8 @@ def page_attributes():
 KIND_LABEL = {"product": "Product field", "stock": "Stock", "category": "Category field", "cat_assign": "Add to category",
               "cat_remove": "Remove from category", "cat_create": "New subcategory", "link_add": "Add link",
               "link_remove": "Remove link", "image_update": "Image", "image_add": "Upload image",
-              "image_remove": "Remove image", "option_add": "New option"}
+              "image_remove": "Remove image", "option_add": "New option",
+              "winmentor": "WinMENTOR (for the operator)"}
 
 
 def _row(ch, attrs, status=None, note=None):
@@ -626,9 +722,12 @@ def page_review():
     st.header("Review and push")
     if "last_push" in st.session_state:
         res = st.session_state.pop("last_push")
-        ok = sum(1 for r in res if r["Check"] == "Done")
+        ok = sum(1 for r in res if r["Check"] in ("Done", "Sent to the operator"))
         (st.success if ok == len(res) else st.warning)(f"{ok} of {len(res)} changes written and checked.")
         st.dataframe(pd.DataFrame(res), hide_index=True)
+        sent = sum(1 for r in res if r["Check"] == "Sent to the operator")
+        if sent:
+            st.info(f"{sent} WinMENTOR changes went to the operator's list: Data health, tab For the operator.")
     pending = core.load_pending()
     if not pending:
         st.info("Nothing is waiting. Changes you make in Catalogue appear here before anything is written.")
@@ -639,11 +738,29 @@ def page_review():
         r = _row(ch, attrs)
         r["Push"] = r["Check"] == "Passed"
         r["Discard"] = False
+        r["Prediction"] = ch.get("prediction", "")
         rows.append(r)
-    df = pd.DataFrame(rows)[["Push", "Discard", "Check", "Note", "What", "Item", "Field", "From", "To"]]
-    st.caption("Passed changes are ticked. Warnings need your tick. Blocked changes can't be pushed.")
-    edited = st.data_editor(df, hide_index=True, key="r_table",
-                            disabled=["Check", "Note", "What", "Item", "Field", "From", "To"])
+    df = pd.DataFrame(rows)[["Push", "Discard", "Check", "Note", "What", "Item", "Field", "From", "To",
+                             "Prediction"]]
+    st.caption("Passed changes are ticked. Warnings need your tick. Blocked changes can't be pushed. "
+               "Prediction (optional): why, and what we expect by when. It goes into the change log with the "
+               "change.")
+    # a fresh table whenever the waiting changes differ, so a tick or a prediction can't land on another row
+    table_key = "r_table_" + str(abs(hash(tuple(p["id"] for p in pending))))
+    edited = st.data_editor(df, hide_index=True, key=table_key,
+                            disabled=["Check", "Note", "What", "Item", "Field", "From", "To"],
+                            column_config={"Prediction": st.column_config.TextColumn("Prediction", width="large")})
+    typed = False
+    for i, r in edited.iterrows():                 # a prediction typed in the table is kept straight away
+        text = "" if pd.isna(r["Prediction"]) else str(r["Prediction"]).strip()
+        if text != (pending[i].get("prediction") or ""):
+            pending[i]["prediction"] = text
+            typed = True
+    if typed:
+        core.save_pending(pending)
+    same = st.text_input("Prediction for every ticked change that has none (optional)",
+                         key=f"r_pred_{st.session_state.get('r_pred_n', 0)}",
+                         placeholder="Why, and what we expect by when")
     a, b = st.columns(2)
     if a.button("Discard ticked"):
         drop = {pending[i]["id"] for i, r in edited.iterrows() if r["Discard"]}
@@ -654,15 +771,30 @@ def page_review():
         if not chosen:
             st.info("Nothing ticked to push.")
             return
-        m = need_connection()
+        if same.strip():
+            for ch in chosen:
+                if not (ch.get("prediction") or "").strip():
+                    ch["prediction"] = same.strip()
+            core.save_pending(pending)
+        m = need_connection() if any(ch["kind"] != "winmentor" for ch in chosen) else mg()
         bar = st.progress(0.0, "Writing")
         results = core.push(m, cache(), chosen, lambda f, t: bar.progress(min(float(f), 1.0), t))
         st.session_state.last_push = [_row(ch, attrs, s, n) for ch, s, n in results]
+        st.session_state["r_pred_n"] = st.session_state.get("r_pred_n", 0) + 1   # an empty line next time
         st.rerun()
 
 
 def page_log():
     st.header("Change log")
+    import views_changes
+    pushed, by_hand = st.tabs(["Pushed from Houston", "Made by hand"])
+    with pushed:
+        _pushed_log()
+    with by_hand:
+        views_changes.hand_tab()
+
+
+def _pushed_log():
     log = core.read_log()[::-1]
     if not log:
         st.info("No changes pushed from Houston yet.")
@@ -672,7 +804,8 @@ def page_log():
     for e in log:
         r = _row(e, attrs, e.get("status", ""), e.get("note", ""))
         rows.append({"When": e.get("pushed_at", ""), **{k: r[k] for k in ("What", "Item", "Field", "From", "To")},
-                     "Result": e.get("status", ""), "Note": e.get("note", "")})
+                     "Result": e.get("status", ""), "Note": e.get("note", ""),
+                     "Prediction": e.get("prediction", "")})
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     undoable = [e for e in log if core.undo_change(e)]
     if undoable:
@@ -681,7 +814,8 @@ def page_log():
         if st.button("Add undo to review"):
             core.queue([core.undo_change(pick)])
             st.success("Undo added to Review and push.")
-    st.caption("Changes made before Houston (2 and 5 October) are in the project record, not here.")
+    st.caption("Changes made outside Houston, for example by hand in the Magento admin, go in the tab "
+               "Made by hand.")
 
 
 def page_worklog():
@@ -703,7 +837,8 @@ def _show_ga_result(res):
     for t, err in res.get("errors", {}).items():
         st.error(f"{t} was not pulled: {err}")
     if res.get("tokens_left_this_hour") is not None:
-        st.caption(f"Google Analytics allowance left this hour: {res['tokens_left_this_hour']:,} tokens.")
+        st.markdown(f"{google_label('analytics')} allowance left this hour: "
+                    f"{res['tokens_left_this_hour']:,} tokens.", unsafe_allow_html=True)
 
 
 def closing_conn():
@@ -719,7 +854,7 @@ def _later(name):
 def page_google_search_console():
     import datetime as _dt
     import google_sc as g
-    st.header("Google Search Console")
+    st.markdown(f"<h1>{google_label('search_console')}</h1>", unsafe_allow_html=True)
     state = g.status()
     if state == "no_client":
         st.warning("Save the file downloaded from Google Cloud as `secrets/client_secret.json` in the Houston folder, "
@@ -743,7 +878,8 @@ def page_google_search_console():
             st.rerun()
         return
     if not props:
-        st.warning("This Google account has no Search Console properties.")
+        st.markdown(f"This Google account has no {google_label('search_console')} properties.",
+                    unsafe_allow_html=True)
         return
     names = [p for p, _ in props]
     default = next((i for i, p in enumerate(names) if p.startswith("sc-domain:")), 0)
@@ -763,8 +899,9 @@ def page_google_search_console():
     if not last:
         return
     for gap_start, gap_end, n in g.missing_ranges(prop):
-        st.warning(f"No data stored for {gap_start} to {gap_end} ({n} days). Google returned nothing for these dates. "
-                   "If Search Console shows them as processing, try again a day later.")
+        st.markdown(f"No data stored for {gap_start} to {gap_end} ({n} days). Google returned nothing for these dates. "
+                    f"If {google_label('search_console')} shows them as processing, try again a day later.",
+                    unsafe_allow_html=True)
         if st.button(f"Try again for {gap_start} to {gap_end}", key=f"gap_{gap_start}"):
             bar = st.progress(0.0, "Starting")
             try:
@@ -774,7 +911,7 @@ def page_google_search_console():
                 st.rerun()
             except g.GoogleError as e:
                 st.error(str(e))
-    st.subheader("Check against Search Console")
+    st.markdown(f"<h3>Check against {google_label('search_console')}</h3>", unsafe_allow_html=True)
     end = _dt.date.fromisoformat(last)
     a, b = st.columns(2)
     start = a.date_input("From", end - _dt.timedelta(days=27), key="gsc_from")
@@ -786,27 +923,32 @@ def page_google_search_console():
         m2.metric("Impressions", f"{t['impressions']:,}")
         m3.metric("CTR", f"{t['ctr']:.1%}")
         m4.metric("Avg. position", f"{t['position']:.1f}")
-        st.caption(f"{t['days']} days. Open Search Console → Performance with exactly these dates: clicks and "
-                   "impressions should match. Position is impression-weighted here, so it can differ slightly.")
+        st.markdown(f"{t['days']} days. Open {google_label('search_console')} → Performance with exactly these dates: "
+                    "clicks and impressions should match. Position is impression-weighted here, so it can differ "
+                    "slightly.", unsafe_allow_html=True)
         with closing_conn() as c:
             df = pd.read_sql_query("SELECT date, clicks, impressions FROM gsc_totals WHERE property = ? AND date "
                                    "BETWEEN ? AND ? ORDER BY date", c, params=(prop, start.isoformat(), stop.isoformat()))
         st.line_chart(df.set_index("date"))
 
 
-def page_google_analytics():
+def page_google_analytics(title=True):
     import datetime as _dt
     import google_auth
     import google_ga as ga
-    st.header("Google Analytics")
+    if title:
+        st.markdown(f"<h1>{google_label('analytics')}</h1>", unsafe_allow_html=True)
     state = ga.status()
     if state == "no_client":
         st.warning("Save the file downloaded from Google Cloud as `secrets/client_secret.json` in the Houston folder.")
         return
     if state in ("not_signed_in", "needs_permission"):
-        st.info("Houston needs read access to Google Analytics. Sign in as nicoleta@biomania.ro: a browser tab opens; "
-                "allow both Search Console and Analytics, then come back here." if state == "needs_permission" else
-                "Sign in once as nicoleta@biomania.ro. A browser tab opens; after you allow access, come back here.")
+        if state == "needs_permission":
+            st.markdown(f"Houston needs read access to {google_label('analytics')}. Sign in as nicoleta@biomania.ro: "
+                        f"a browser tab opens; allow both {google_label('search_console')} and "
+                        f"{google_label('analytics')}, then come back here.", unsafe_allow_html=True)
+        else:
+            st.info("Sign in once as nicoleta@biomania.ro. A browser tab opens; after you allow access, come back here.")
         if st.button("Sign in with Google", type="primary", key="ga_signin"):
             try:
                 google_auth.sign_in()
@@ -818,9 +960,12 @@ def page_google_analytics():
         props = ga.properties()
     except ga.GoogleError as e:
         st.error(str(e))
+        if st.button("Sign in again", key="ga_signin_again"):
+            google_auth.sign_out()
+            st.rerun()
         return
     if not props:
-        st.warning("This Google account has no Google Analytics properties.")
+        st.markdown(f"This Google account has no {google_label('analytics')} properties.", unsafe_allow_html=True)
         return
     labels = dict(props)
     names = [p for p, _ in props]
@@ -856,7 +1001,7 @@ def page_google_analytics():
     if not errs.empty:
         with st.expander(f"Errors from recent pulls ({len(errs)})"):
             st.dataframe(errs, hide_index=True)
-    st.subheader("Check against Google Analytics")
+    st.markdown(f"<h3>Check against {google_label('analytics')}</h3>", unsafe_allow_html=True)
     end = _dt.date.fromisoformat(last)
     a, b = st.columns(2)
     start = a.date_input("From", end - _dt.timedelta(days=27), key="ga_from")
@@ -868,9 +1013,10 @@ def page_google_analytics():
         m2.metric("Engaged sessions", f"{t['engaged_sessions']:,}")
         m3.metric("Purchases", f"{t['purchases']:,}")
         m4.metric("Revenue", f"{t['revenue']:,.2f}")
-        st.caption(f"{t['days']} days. In Google Analytics open Reports → Acquisition → Traffic acquisition with exactly "
-                   "these dates: sessions, purchases and revenue should match the totals row. Users aren't shown here "
-                   "because daily user counts can't be added up into a total for a period.")
+        st.markdown(f"{t['days']} days. In {google_label('analytics')} open Reports → Acquisition → Traffic "
+                    "acquisition with exactly these dates: sessions, purchases and revenue should match the totals "
+                    "row. Users aren't shown here because daily user counts can't be added up into a total for a "
+                    "period.", unsafe_allow_html=True)
         with closing_conn() as c:
             df = pd.read_sql_query("SELECT date, sessions FROM ga4_totals WHERE property = ? AND date BETWEEN ? AND ? "
                                    "ORDER BY date", c, params=(prop, start.isoformat(), stop.isoformat()))

@@ -31,13 +31,22 @@ TABLE_NOTES = {
     "change_log": "Every change pushed from Houston, with result (Done/Check/Failed) and backup file.",
     "gsc_totals": "Search Console, whole site per day (web search). Includes anonymised queries, so it matches "
                   "the Search Console graph. position = average position that day.",
-    "gsc_pages": "Search Console per day, page and device (DESKTOP/MOBILE/TABLET). Includes anonymised queries.",
-    "gsc_queries": "Search Console per day, query, page and device. Google leaves out anonymised queries here, "
+    "gsc_pages": "View. Search Console per day, page and device (DESKTOP/MOBILE/TABLET). Includes anonymised queries. "
+                 "ctr is clicks/impressions.",
+    "gsc_queries": "View. Search Console per day, query, page and device. Google leaves out anonymised queries here, "
                    "so sums are lower than gsc_pages/gsc_totals. Weight position by impressions when aggregating.",
     "gsc_pulls": "Every Search Console pull: when it ran, which table, the date range and row count.",
     "ga4_totals": "Google Analytics 4, whole site per day: sessions, active users, engaged sessions, key events, "
                   "purchases, revenue (lei). Users can't be summed across days into a period total.",
-    "ga4_landing": "GA4 per day, landing page (path, e.g. /produs.html) and channel (Organic Search, Direct, ...). "
+    "dict": "Internal: every page address, search, device, channel and property stored once (kind, value). "
+            "The *_c tables point to it by id.",
+    "gsc_pages_c": "Internal compact storage behind the gsc_pages view (ids instead of text). For heavy questions, "
+                   "query this joined to dict instead of the view.",
+    "gsc_queries_c": "Internal compact storage behind the gsc_queries view (ids instead of text). For heavy questions, "
+                     "aggregate here first and join dict only for the rows you return.",
+    "ga4_landing_c": "Internal compact storage behind the ga4_landing view (ids instead of text).",
+    "settings": "Houston settings, e.g. the backup folder and the last backup.",
+    "ga4_landing": "View. GA4 per day, landing page (path, e.g. /produs.html) and channel (Organic Search, Direct, ...). "
                    "Join to products on url_key: landing_page = '/' || url_key || '.html'. Visits that started on "
                    "Magento compare/wishlist/stock-alert/send-to-friend links are one row per day and channel with "
                    "landing_page = '(Magento action links)' (months pulled before 9 Oct 2026 may still hold them "
@@ -49,6 +58,11 @@ TABLE_NOTES = {
     "ga4_pulls": "Every GA4 pull: when it ran, which table, the date range and row count.",
 }
 
+from winmentor import TABLE_NOTES as _WM_NOTES; TABLE_NOTES.update(_WM_NOTES)
+try:  # changes made by hand (Catalogue > Change log, tab Made by hand): what the new tables hold
+    from hand_changes import TABLE_NOTES as _HC_NOTES; TABLE_NOTES.update(_HC_NOTES)
+except Exception:  # noqa: BLE001  (a description must never stop the server)
+    pass
 
 def _get_cat():
     try:
@@ -489,7 +503,8 @@ def describe_database() -> dict:
     try:
         with closing(core.connect()) as c:
             out = []
-            for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
+            for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') "
+                                     "AND name NOT LIKE 'sqlite_%' ORDER BY name"):
                 cols = [r[1] for r in c.execute(f'PRAGMA table_info("{name}")')]
                 rows = c.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
                 out.append({"table": name, "rows": rows, "columns": cols, "about": TABLE_NOTES.get(name, "")})
@@ -586,6 +601,114 @@ def replace_worklog_section(section: str, text: str) -> dict:
     _worklog_backup()
     WORKLOG.write_text(new_doc, encoding="utf-8")
     return {"replaced": section}
+
+
+# ---------------------------------------------------------------- code (read-only)
+# Claude can read Houston's own code, so it always sees the current version (including edits made with other
+# tools). Only text files under the Houston folder. Never data/, secrets/, the Python environment, git internals,
+# backups, or anything named like a secret, token, key or credential. Nothing here can write.
+CODE_ROOT = Path(__file__).resolve().parent
+CODE_SKIP_DIRS = {"data", "secrets", ".venv", "venv", "env", ".git", "__pycache__", "node_modules", "backups",
+                  ".pytest_cache", ".mypy_cache"}
+CODE_EXT = {".py", ".md", ".txt", ".toml", ".cfg", ".ini", ".yaml", ".yml", ".css", ".js", ".html", ".ps1",
+            ".bat", ".sql", ".gitignore"}
+CODE_SECRETISH = re.compile(r"secret|token|credential|password|passwd|apikey|api_key|\.env|\.key$|\.pem$|\.p12$", re.I)
+CODE_MAX_LINES = 800
+
+
+def _code_ok(p):
+    try:
+        rel = p.resolve().relative_to(CODE_ROOT)
+    except ValueError:
+        return False  # outside the Houston folder, including through links
+    if any(part.lower() in CODE_SKIP_DIRS for part in rel.parts[:-1]):
+        return False
+    name = rel.name.lower()
+    ext = ".gitignore" if name == ".gitignore" else p.suffix.lower()
+    return p.is_file() and ext in CODE_EXT and not CODE_SECRETISH.search(name)
+def _code_files():
+    import os
+    out = []
+    for root, dirs, files in os.walk(CODE_ROOT):
+        # never walk into data/, secrets/, .venv, .git, backups: faster, and nothing in there can break the list
+        dirs[:] = sorted(d for d in dirs if d.lower() not in CODE_SKIP_DIRS)
+        for name in sorted(files):
+            p = Path(root) / name
+            try:
+                if _code_ok(p):
+                    out.append(p)
+            except OSError:
+                continue  # a locked or unreadable file is skipped instead of breaking the tool
+    return out
+
+
+def _fingerprint(data):
+    import hashlib
+    return hashlib.sha1(data).hexdigest()[:10]
+
+
+@mcp.tool()
+def list_code_files() -> dict:
+    """List Houston's code files, read-only: path, size, number of lines, last change and a fingerprint
+    (changes whenever the file's content changes). data/, secrets/, the Python environment, .git and
+    backups are never listed."""
+    files, skipped = [], []
+    for p in _code_files():
+        rel = p.relative_to(CODE_ROOT).as_posix()
+        try:
+            data = p.read_bytes()
+            modified = datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except OSError as e:
+            skipped.append(f"{rel}: {type(e).__name__}")
+            continue
+        files.append({"path": rel, "bytes": len(data),
+                      "lines": data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0),
+                      "modified": modified, "fingerprint": _fingerprint(data)})
+    out = {"folder": str(CODE_ROOT), "files": files}
+    if skipped:
+        out["skipped"] = skipped
+    return out
+
+
+@mcp.tool()
+def read_code_file(path: str, start_line: int = 1, end_line: int = 0) -> dict:
+    """Read one of Houston's code files (a path from list_code_files, e.g. 'core.py'), with line numbers.
+    Read-only. At most 800 lines per call: use start_line/end_line to page through longer files."""
+    p = CODE_ROOT / path.replace("\\", "/").lstrip("/")
+    if not _code_ok(p):
+        return {"error": "Not readable: only Houston's own code files can be read (see list_code_files)."}
+    text = p.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    start = max(1, int(start_line or 1))
+    end = int(end_line or 0) or len(lines)
+    end = min(end, len(lines), start + CODE_MAX_LINES - 1)
+    width = len(str(end))
+    body = "\n".join(f"{i:>{width}}| {lines[i - 1]}" for i in range(start, end + 1))
+    out = {"path": p.relative_to(CODE_ROOT).as_posix(), "total_lines": len(lines), "from": start, "to": end,
+           "modified": datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+           "fingerprint": _fingerprint(p.read_bytes()), "text": body}
+    if end < len(lines):
+        out["continue"] = f"More lines: call again with start_line={end + 1}."
+    return out
+
+
+@mcp.tool()
+def search_code(text: str, max_results: int = 100) -> dict:
+    """Find text in Houston's code files (case-insensitive): path, line number and the line. Read-only."""
+    needle, hits = text.lower(), []
+    if not needle.strip():
+        return {"error": "Give some text to look for."}
+    for p in _code_files():
+        try:
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines, 1):
+            if needle in line.lower():
+                hits.append({"path": p.relative_to(CODE_ROOT).as_posix(), "line": i, "text": line.strip()[:300]})
+                if len(hits) >= min(int(max_results or 100), 500):
+                    return {"hits": hits, "truncated": True}
+    return {"hits": hits, "truncated": False}
 
 
 if __name__ == "__main__":

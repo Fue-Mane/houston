@@ -3,6 +3,7 @@
 Every write is done at Default Values (store 0) and by SKU, never by product ID.
 """
 import time
+import http.client
 import xmlrpc.client
 
 STORE = "0"
@@ -22,13 +23,23 @@ def _readable(fault):
 class Magento:
     def __init__(self, url, user, key):
         self.url, self.user, self._key = url, user, key
-        self.proxy = xmlrpc.client.ServerProxy(url)
+        self.proxy = None
+        self._reset_proxy()
         self.session = None
         self.gap = 0.5        # seconds between requests; grows when the store asks to slow down
         self._last = 0.0
         self.on_wait = None   # optional callback(seconds) to show waiting in the UI
 
     # --- connection -----------------------------------------------------
+    def _reset_proxy(self):
+        """Discard a half-used HTTP connection and create a fresh XML-RPC proxy."""
+        if self.proxy is not None:
+            try:
+                self.proxy.close()
+            except Exception:
+                pass
+        self.proxy = xmlrpc.client.ServerProxy(self.url)
+
     def login(self):
         try:
             self.session = self.proxy.login(self.user, self._key)
@@ -43,6 +54,10 @@ class Magento:
                 self.proxy.endSession(self.session)
         except Exception:
             pass
+        try:
+            self.proxy.close()
+        except Exception:
+            pass
         self.session = None
 
     def _pace(self):
@@ -51,12 +66,22 @@ class Magento:
             time.sleep(wait)
         self._last = time.monotonic()
 
-    def _run(self, fn, attempts=8):
+    def _run(self, fn, attempts=8, retry_connection=True):
         relogged = False
+        connection_retried = False
         for attempt in range(attempts):
             self._pace()
             try:
                 return fn()
+            except (http.client.ResponseNotReady, http.client.CannotSendRequest,
+                    http.client.RemoteDisconnected, http.client.BadStatusLine,
+                    ConnectionResetError, BrokenPipeError, TimeoutError) as e:
+                if retry_connection and not connection_retried and attempt < attempts - 1:
+                    connection_retried = True
+                    self._reset_proxy()
+                    self.gap = max(self.gap, 1.0)
+                    continue
+                raise ApiError(f"Connection problem: {type(e).__name__}: {e}") from None
             except xmlrpc.client.ProtocolError as e:
                 if e.errcode in (429, 503) and attempt < attempts - 1:
                     retry = e.headers.get("Retry-After") if e.headers else None
@@ -105,7 +130,8 @@ class Magento:
 
     def add_option(self, code, label):
         data = {"label": [{"store_id": [STORE], "value": label}], "order": 0, "is_default": 0}
-        return self.call("catalog_product_attribute.addOption", [code, data])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_product_attribute.addOption",
+                                                 [code, data]), retry_connection=False)
 
     # --- products -------------------------------------------------------
     def product_list(self, filters=None):
@@ -119,36 +145,43 @@ class Magento:
         return self.call("catalog_product.info", [sku, STORE, codes, "sku"])
 
     def update_product(self, sku, data):
-        return self.call("catalog_product.update", [sku, data, STORE, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_product.update",
+                                                 [sku, data, STORE, "sku"]), retry_connection=False)
 
     def stock(self, skus):
         return self.call("cataloginventory_stock_item.list", [skus])
 
     def update_stock(self, sku, data):
-        return self.call("cataloginventory_stock_item.update", [sku, data])
+        return self._run(lambda: self.proxy.call(self.session, "cataloginventory_stock_item.update",
+                                                 [sku, data]), retry_connection=False)
 
     # --- images ---------------------------------------------------------
     def media(self, sku):
         return self.call("catalog_product_attribute_media.list", [sku, STORE, "sku"])
 
     def media_update(self, sku, file, data):
-        return self.call("catalog_product_attribute_media.update", [sku, file, data, STORE, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_product_attribute_media.update",
+                                                 [sku, file, data, STORE, "sku"]), retry_connection=False)
 
     def media_create(self, sku, data):
-        return self.call("catalog_product_attribute_media.create", [sku, data, STORE, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_product_attribute_media.create",
+                                                 [sku, data, STORE, "sku"]), retry_connection=False)
 
     def media_remove(self, sku, file):
-        return self.call("catalog_product_attribute_media.remove", [sku, file, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_product_attribute_media.remove",
+                                                 [sku, file, "sku"]), retry_connection=False)
 
     # --- related products ----------------------------------------------
     def links(self, link_type, sku):
         return self.call("catalog_product_link.list", [link_type, sku, "sku"])
 
     def link_assign(self, link_type, sku, linked):
-        return self.call("catalog_product_link.assign", [link_type, sku, linked, {}, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_product_link.assign",
+                                                 [link_type, sku, linked, {}, "sku"]), retry_connection=False)
 
     def link_remove(self, link_type, sku, linked):
-        return self.call("catalog_product_link.remove", [link_type, sku, linked, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_product_link.remove",
+                                                 [link_type, sku, linked, "sku"]), retry_connection=False)
 
     # --- categories -----------------------------------------------------
     def category_tree(self):
@@ -158,16 +191,20 @@ class Magento:
         return self.call("catalog_category.info", [cid, STORE])
 
     def category_update(self, cid, data):
-        return self.call("catalog_category.update", [cid, data, STORE])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_category.update",
+                                                 [cid, data, STORE]), retry_connection=False)
 
     def category_create(self, parent_id, data):
-        return self.call("catalog_category.create", [parent_id, data, STORE])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_category.create",
+                                                 [parent_id, data, STORE]), retry_connection=False)
 
     def category_products(self, cid):
         return self.call("catalog_category.assignedProducts", [cid, STORE])
 
     def category_assign(self, cid, sku):
-        return self.call("catalog_category.assignProduct", [cid, sku, 0, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_category.assignProduct",
+                                                 [cid, sku, 0, "sku"]), retry_connection=False)
 
     def category_remove(self, cid, sku):
-        return self.call("catalog_category.removeProduct", [cid, sku, "sku"])
+        return self._run(lambda: self.proxy.call(self.session, "catalog_category.removeProduct",
+                                                 [cid, sku, "sku"]), retry_connection=False)

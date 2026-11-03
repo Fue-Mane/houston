@@ -2,7 +2,8 @@
 
 - secrets/client_secret.json  downloaded from Google Cloud
 - secrets/google_token.json   written at sign-in; lets Houston refresh access by itself
-Read-only permissions: Search Console and Google Analytics. The MCP server never reads these files.
+Read-only permissions: Search Console, Google Analytics and Cloud Storage (the WinMENTOR bucket).
+The MCP server never reads these files.
 """
 import json
 from pathlib import Path
@@ -11,7 +12,8 @@ SECRETS = Path(__file__).parent / "secrets"
 CLIENT_FILE = SECRETS / "client_secret.json"
 TOKEN_FILE = SECRETS / "google_token.json"
 SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly",
-          "https://www.googleapis.com/auth/analytics.readonly"]
+          "https://www.googleapis.com/auth/analytics.readonly",
+          "https://www.googleapis.com/auth/devstorage.read_only"]
 
 
 class GoogleError(Exception):

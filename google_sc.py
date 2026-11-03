@@ -96,13 +96,18 @@ def pull(prop, start=None, end=None, progress=lambda f, t: None, svc=None):
             step += 1
             progress(step / max(steps, 1), f"{table}: {m_start:%b %Y}")
             rows = _fetch(svc, prop, m_start, m_end, dims)
-            records = [(prop, *r["keys"], int(r.get("clicks", 0)), int(r.get("impressions", 0)),
-                        float(r.get("ctr", 0)), float(r.get("position", 0)), pulled_at) for r in rows]
-            marks = ", ".join("?" * (len(cols) + 6))
             with closing(core.connect()) as c, c:
-                c.execute(f"DELETE FROM {table} WHERE property = ? AND date BETWEEN ? AND ?",
-                          (prop, m_start.isoformat(), m_end.isoformat()))
-                c.executemany(f"INSERT OR REPLACE INTO {table} VALUES ({marks})", records)
+                if table == "gsc_totals":
+                    records = [(prop, *r["keys"], int(r.get("clicks", 0)), int(r.get("impressions", 0)),
+                                float(r.get("ctr", 0)), float(r.get("position", 0)), pulled_at) for r in rows]
+                    c.execute("DELETE FROM gsc_totals WHERE property = ? AND date BETWEEN ? AND ?",
+                              (prop, m_start.isoformat(), m_end.isoformat()))
+                    c.executemany(f"INSERT OR REPLACE INTO gsc_totals VALUES ({', '.join('?' * 7)})", records)
+                else:  # compact storage: see core.write_compact
+                    records = [dict(zip(dims, r["keys"]), clicks=int(r.get("clicks", 0)),
+                                    impressions=int(r.get("impressions", 0)), position=float(r.get("position", 0)))
+                               for r in rows]
+                    core.write_compact(c, table, prop, m_start.isoformat(), m_end.isoformat(), records)
                 c.execute("INSERT INTO gsc_pulls VALUES (?, ?, ?, ?, ?, ?)",
                           (pulled_at, prop, table, m_start.isoformat(), m_end.isoformat(), len(records)))
             counts[table] += len(records)

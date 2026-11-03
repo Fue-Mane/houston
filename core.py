@@ -93,17 +93,19 @@ CREATE TABLE IF NOT EXISTS change_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, id
     target TEXT, target_label TEXT, field TEXT, old TEXT, new TEXT, status TEXT, note TEXT, backup TEXT, entry TEXT);
 CREATE TABLE IF NOT EXISTS gsc_totals (property TEXT, date TEXT, clicks INTEGER, impressions INTEGER, ctr REAL,
     position REAL, pulled_at TEXT, PRIMARY KEY (property, date));
-CREATE TABLE IF NOT EXISTS gsc_pages (property TEXT, date TEXT, page TEXT, device TEXT, clicks INTEGER,
-    impressions INTEGER, ctr REAL, position REAL, pulled_at TEXT, PRIMARY KEY (property, date, page, device));
-CREATE TABLE IF NOT EXISTS gsc_queries (property TEXT, date TEXT, query TEXT, page TEXT, device TEXT, clicks INTEGER,
-    impressions INTEGER, ctr REAL, position REAL, pulled_at TEXT, PRIMARY KEY (property, date, query, page, device));
+CREATE TABLE IF NOT EXISTS dict (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, value TEXT NOT NULL,
+    UNIQUE (kind, value));
+CREATE TABLE IF NOT EXISTS gsc_pages_c (prop INTEGER, date TEXT, page INTEGER, device INTEGER, clicks INTEGER,
+    impressions INTEGER, position REAL, PRIMARY KEY (prop, date, page, device)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gsc_queries_c (prop INTEGER, date TEXT, query INTEGER, page INTEGER, device INTEGER,
+    clicks INTEGER, impressions INTEGER, position REAL, PRIMARY KEY (prop, date, query, page, device)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gsc_pulls (pulled_at TEXT, property TEXT, table_name TEXT, start_date TEXT, end_date TEXT,
     rows INTEGER);
 CREATE TABLE IF NOT EXISTS ga4_totals (property TEXT, date TEXT, sessions INTEGER, active_users INTEGER,
     engaged_sessions INTEGER, key_events REAL, purchases INTEGER, revenue REAL, pulled_at TEXT, PRIMARY KEY (property, date));
-CREATE TABLE IF NOT EXISTS ga4_landing (property TEXT, date TEXT, landing_page TEXT, channel TEXT, sessions INTEGER,
-    active_users INTEGER, engaged_sessions INTEGER, key_events REAL, purchases INTEGER, revenue REAL, pulled_at TEXT,
-    PRIMARY KEY (property, date, landing_page, channel));
+CREATE TABLE IF NOT EXISTS ga4_landing_c (prop INTEGER, date TEXT, page INTEGER, channel INTEGER, sessions INTEGER,
+    active_users INTEGER, engaged_sessions INTEGER, key_events REAL, purchases INTEGER, revenue REAL,
+    PRIMARY KEY (prop, date, page, channel)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS ga4_items (property TEXT, date TEXT, item_id TEXT, item_name TEXT, items_viewed INTEGER,
     items_added_to_cart INTEGER, items_purchased INTEGER, item_revenue REAL, pulled_at TEXT,
     PRIMARY KEY (property, date, item_id, item_name));
@@ -113,14 +115,31 @@ CREATE TABLE IF NOT EXISTS ga4_pulls (pulled_at TEXT, property TEXT, table_name 
     rows INTEGER);
 CREATE TABLE IF NOT EXISTS ga4_pull_errors (pulled_at TEXT, property TEXT, table_name TEXT, start_date TEXT,
     end_date TEXT, error TEXT);
-CREATE INDEX IF NOT EXISTS ix_ga4_landing_page ON ga4_landing (landing_page);
 CREATE INDEX IF NOT EXISTS ix_ga4_items_id ON ga4_items (item_id);
-CREATE INDEX IF NOT EXISTS ix_gsc_q_query ON gsc_queries (query);
-CREATE INDEX IF NOT EXISTS ix_gsc_q_page ON gsc_queries (page);
-CREATE INDEX IF NOT EXISTS ix_gsc_p_page ON gsc_pages (page);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS ix_values_code ON product_values (code);
 CREATE INDEX IF NOT EXISTS ix_log_target ON change_log (target);
 """
+# The three big Google tables are stored compactly: every page address, search, device, channel and property
+# is stored once in `dict`, and the data rows point to it by number (the *_c tables, WITHOUT ROWID so the key
+# isn't stored twice). Views with the old names give the familiar columns back, so readers see no difference.
+COMPACT_VIEWS = {
+    "gsc_pages": """CREATE VIEW gsc_pages AS SELECT p.value AS property, t.date, g.value AS page, d.value AS device,
+        t.clicks, t.impressions, CASE WHEN t.impressions > 0 THEN 1.0 * t.clicks / t.impressions ELSE 0 END AS ctr,
+        t.position FROM gsc_pages_c t JOIN dict p ON p.id = t.prop JOIN dict g ON g.id = t.page
+        JOIN dict d ON d.id = t.device""",
+    "gsc_queries": """CREATE VIEW gsc_queries AS SELECT p.value AS property, t.date, q.value AS query, g.value AS page,
+        d.value AS device, t.clicks, t.impressions,
+        CASE WHEN t.impressions > 0 THEN 1.0 * t.clicks / t.impressions ELSE 0 END AS ctr, t.position
+        FROM gsc_queries_c t JOIN dict p ON p.id = t.prop JOIN dict q ON q.id = t.query JOIN dict g ON g.id = t.page
+        JOIN dict d ON d.id = t.device""",
+    "ga4_landing": """CREATE VIEW ga4_landing AS SELECT p.value AS property, t.date, g.value AS landing_page,
+        ch.value AS channel, t.sessions, t.active_users, t.engaged_sessions, t.key_events, t.purchases, t.revenue
+        FROM ga4_landing_c t JOIN dict p ON p.id = t.prop JOIN dict g ON g.id = t.page JOIN dict ch ON ch.id = t.channel""",
+}
+ACTION_LINKS = "(Magento action links)"
+ACTION_PREFIXES = ["/catalog/product_compare/", "/wishlist/", "/productalert/", "/sendfriend/"]
+
 CATALOGUE_TABLES = ["meta", "attributes", "attribute_options", "attribute_sets", "set_attributes", "products",
                     "product_values", "product_categories", "categories", "category_tree"]
 
@@ -142,9 +161,222 @@ def connect():
     if str(path) not in _schema_ready:
         c.execute("PRAGMA journal_mode = WAL")
         c.executescript(SCHEMA)
+        _ensure_views(c)
         _migrate_json(c)
         _schema_ready.add(str(path))
     return c
+
+
+def _kind_of(c, name):
+    row = c.execute("SELECT type FROM sqlite_master WHERE name = ?", (name,)).fetchone()
+    return row[0] if row else None
+
+
+def _ensure_views(c):
+    for name, sql in COMPACT_VIEWS.items():
+        if _kind_of(c, name) is None:      # a table of that name means the reorganisation hasn't run yet
+            c.execute(sql)
+    c.commit()
+
+
+def needs_compaction():
+    with closing(connect()) as c:
+        return any(_kind_of(c, n) == "table" for n in COMPACT_VIEWS)
+
+
+def ids(c, kind, values):
+    """{value: number} for text values, adding the ones not stored yet."""
+    vals = list({"" if v is None else str(v) for v in values})
+    c.executemany("INSERT OR IGNORE INTO dict (kind, value) VALUES (?, ?)", [(kind, v) for v in vals])
+    out = {}
+    for i in range(0, len(vals), 500):
+        part = vals[i:i + 500]
+        out.update({v: n for n, v in c.execute(
+            f"SELECT id, value FROM dict WHERE kind = ? AND value IN ({','.join('?' * len(part))})", [kind, *part])})
+    return out
+
+
+def action_link(page):
+    return ACTION_LINKS if any(str(page).startswith(p) for p in ACTION_PREFIXES) else page
+
+
+def write_compact(c, table, prop, start, end, rows):
+    """Replace one property's rows between two dates. rows: dicts with the view's column names."""
+    pid = ids(c, "property", [prop])[prop]
+    if table == "gsc_pages":
+        pages, devs = ids(c, "gsc_page", [r["page"] for r in rows]), ids(c, "device", [r["device"] for r in rows])
+        c.execute("DELETE FROM gsc_pages_c WHERE prop = ? AND date BETWEEN ? AND ?", (pid, start, end))
+        c.executemany("INSERT OR REPLACE INTO gsc_pages_c VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      [(pid, r["date"], pages[str(r["page"])], devs[str(r["device"])], r["clicks"], r["impressions"],
+                        r["position"]) for r in rows])
+    elif table == "gsc_queries":
+        qs, pages = ids(c, "gsc_query", [r["query"] for r in rows]), ids(c, "gsc_page", [r["page"] for r in rows])
+        devs = ids(c, "device", [r["device"] for r in rows])
+        c.execute("DELETE FROM gsc_queries_c WHERE prop = ? AND date BETWEEN ? AND ?", (pid, start, end))
+        c.executemany("INSERT OR REPLACE INTO gsc_queries_c VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                      [(pid, r["date"], qs[str(r["query"])], pages[str(r["page"])], devs[str(r["device"])],
+                        r["clicks"], r["impressions"], r["position"]) for r in rows])
+    elif table == "ga4_landing":
+        merged = {}  # action links fold into one line per day and channel; sums stay the same
+        for r in rows:
+            key = (r["date"], action_link(r["landing_page"]), r["channel"])
+            m = merged.setdefault(key, [0, 0, 0, 0, 0, 0])
+            for i, f in enumerate(("sessions", "active_users", "engaged_sessions", "key_events", "purchases", "revenue")):
+                m[i] += r[f] or 0
+        pages = ids(c, "ga4_page", [k[1] for k in merged])
+        chans = ids(c, "channel", [k[2] for k in merged])
+        c.execute("DELETE FROM ga4_landing_c WHERE prop = ? AND date BETWEEN ? AND ?", (pid, start, end))
+        c.executemany("INSERT INTO ga4_landing_c VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      [(pid, d, pages[str(p)], chans[str(ch)], *m) for (d, p, ch), m in merged.items()])
+    else:
+        raise ValueError(table)
+
+
+def compact_now(progress=lambda f, t: None):
+    """One-off: move the three big Google tables into compact storage, check that every total matches,
+    then shrink the file. A full copy is kept first as data/houston-before-compaction.db."""
+    report = {"before_mb": round(db_path().stat().st_size / 1048576, 1)}
+    safety = DATA / "houston-before-compaction.db"
+    with closing(connect()) as c:
+        if not any(_kind_of(c, n) == "table" for n in COMPACT_VIEWS):
+            return {"skipped": "already compact"}
+        progress(0.02, "Keeping a full copy first")
+        if not safety.exists():
+            with closing(sqlite3.connect(str(safety))) as dst:
+                c.backup(dst)
+        plans = {
+            "gsc_pages": ("SUM(clicks), SUM(impressions)", "page", "gsc_page", [("device", "device")]),
+            "gsc_queries": ("SUM(clicks), SUM(impressions)", "page", "gsc_page", [("device", "device"), ("query", "gsc_query")]),
+            "ga4_landing": ("SUM(sessions), SUM(engaged_sessions), ROUND(SUM(revenue), 2)", "landing_page", "ga4_page",
+                            [("channel", "channel")]),
+        }
+        for i, (name, (sums, page_col, page_kind, others)) in enumerate(plans.items()):
+            if _kind_of(c, name) != "table":
+                continue
+            progress(0.1 + 0.25 * i, f"Reorganising {name}")
+            before = c.execute(f"SELECT {sums} FROM {name}").fetchone()
+            c.execute("INSERT OR IGNORE INTO dict (kind, value) SELECT DISTINCT 'property', COALESCE(property, '') FROM " + name)
+            if name == "ga4_landing":
+                cases = " OR ".join(f"landing_page LIKE '{p}%'" for p in ACTION_PREFIXES)
+                page_expr = f"CASE WHEN {cases} THEN '{ACTION_LINKS}' ELSE landing_page END"
+            else:
+                page_expr = page_col
+            c.execute(f"INSERT OR IGNORE INTO dict (kind, value) SELECT DISTINCT '{page_kind}', COALESCE({page_expr}, '') "
+                      f"FROM {name}")
+            page_expr = page_expr.replace(page_col, "t." + page_col)
+            for col, kind in others:
+                c.execute(f"INSERT OR IGNORE INTO dict (kind, value) SELECT DISTINCT '{kind}', COALESCE({col}, '') "
+                          f"FROM {name}")
+            joins = (f"JOIN dict dp ON dp.kind = 'property' AND dp.value = COALESCE(t.property, '') "
+                     f"JOIN dict dg ON dg.kind = '{page_kind}' AND dg.value = COALESCE({page_expr}, '')")
+            if name == "gsc_pages":
+                c.execute(f"INSERT OR REPLACE INTO gsc_pages_c SELECT dp.id, t.date, dg.id, dd.id, t.clicks, t.impressions, "
+                          f"t.position FROM gsc_pages t {joins} "
+                          f"JOIN dict dd ON dd.kind = 'device' AND dd.value = COALESCE(t.device, '')")
+            elif name == "gsc_queries":
+                c.execute(f"INSERT OR REPLACE INTO gsc_queries_c SELECT dp.id, t.date, dq.id, dg.id, dd.id, t.clicks, "
+                          f"t.impressions, t.position FROM gsc_queries t {joins} "
+                          f"JOIN dict dd ON dd.kind = 'device' AND dd.value = COALESCE(t.device, '') "
+                          f"JOIN dict dq ON dq.kind = 'gsc_query' AND dq.value = COALESCE(t.query, '')")
+            else:
+                c.execute(f"INSERT OR REPLACE INTO ga4_landing_c SELECT dp.id, t.date, dg.id, dc.id, SUM(t.sessions), "
+                          f"SUM(t.active_users), SUM(t.engaged_sessions), SUM(t.key_events), SUM(t.purchases), "
+                          f"SUM(t.revenue) FROM ga4_landing t {joins} "
+                          f"JOIN dict dc ON dc.kind = 'channel' AND dc.value = COALESCE(t.channel, '') "
+                          f"GROUP BY dp.id, t.date, dg.id, dc.id")
+            c.execute(f"ALTER TABLE {name} RENAME TO {name}_old")
+            c.execute(COMPACT_VIEWS[name])
+            after = c.execute(f"SELECT {sums} FROM {name}").fetchone()
+            if tuple(before) != tuple(after):
+                c.rollback()
+                raise RuntimeError(f"{name}: totals differ after reorganising ({before} vs {after}). "
+                                   f"That table was left exactly as it was.")
+            c.execute(f"DROP TABLE {name}_old")
+            c.commit()
+            report[name] = {"totals": list(after)}
+        progress(0.85, "Shrinking the file")
+    report.update(shrink())
+    report["after_mb"] = round(db_path().stat().st_size / 1048576, 1)
+    progress(1.0, "Done")
+    return report
+
+
+def shrink():
+    """Rewrite the file without empty space. Retried at the next start if something holds the database."""
+    with closing(connect()) as c:
+        try:
+            c.execute("VACUUM")
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            c.execute("DELETE FROM settings WHERE key = 'shrink_pending'")
+            c.commit()
+            return {}
+        except sqlite3.OperationalError as e:
+            c.execute("INSERT OR REPLACE INTO settings VALUES ('shrink_pending', '1')")
+            c.commit()
+            return {"shrink": f"not done yet ({e}); Houston tries again at the next start"}
+
+
+def setting(key, default=None):
+    with closing(connect()) as c:
+        row = c.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(key, value):
+    with closing(connect()) as c, c:
+        c.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, value))
+
+
+def guess_backup_dir():
+    """The usual Google Drive for desktop folders on Windows, first one that exists."""
+    candidates = [Path(f"{d}:/My Drive") for d in "GHIJ"] + [Path(f"{d}:/Drive-ul meu") for d in "GHIJ"] + \
+                 [Path.home() / "Google Drive" / "My Drive", Path.home() / "Google Drive", Path.home() / "My Drive"]
+    for p in candidates:
+        try:
+            if p.is_dir():
+                return str(p / "Houston backups")
+        except OSError:
+            continue
+    return ""
+
+
+def backup_now(dest_dir, keep=8):
+    """A clean snapshot of the database (plus push backups, uploads and the work log), zipped into dest_dir.
+    Keeps the newest `keep` backups there. Never includes secrets/."""
+    import shutil
+    import zipfile
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    snap = DATA / f"snapshot_{stamp}.db"
+    with closing(connect()) as src, closing(sqlite3.connect(str(snap))) as dst:
+        src.backup(dst)                      # a consistent copy, even while Houston or the MCP are working
+    local_zip = DATA / f"houston-backup-{stamp}.zip"
+    with zipfile.ZipFile(local_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.write(snap, "data/houston.db")
+        for folder in (BACKUPS, UPLOADS):
+            for f in folder.glob("*") if folder.exists() else []:
+                z.write(f, f"data/{folder.name}/{f.name}")
+        worklog = Path(__file__).parent / "notes" / "worklog.md"
+        if worklog.exists():
+            z.write(worklog, "notes/worklog.md")
+    snap.unlink()
+    final = dest / local_zip.name
+    shutil.move(str(local_zip), str(final))   # Drive only ever sees the finished file
+    old = sorted(dest.glob("houston-backup-*.zip"))[:-keep]
+    for f in old:
+        f.unlink()
+    size = round(final.stat().st_size / 1048576, 1)
+    set_setting("last_backup", f"{now()}|{final}|{size}")
+    return {"file": str(final), "mb": size, "removed_old": len(old)}
+
+
+def last_backup():
+    v = setting("last_backup")
+    if not v:
+        return None
+    at, path, mb = v.split("|")
+    return {"at": at, "file": path, "mb": float(mb)}
 
 
 def _read_json(path, default):
@@ -478,6 +710,10 @@ def queue(changes):
     pending = load_pending()
     keyf = lambda c: (c["kind"], c["target"], c.get("field"), json.dumps(c.get("extra", {}).get("key")))
     keys = {keyf(c) for c in changes}
+    kept = {keyf(p): p["prediction"] for p in pending if p.get("prediction")}
+    for c in changes:                      # a change queued again keeps the prediction written for it
+        if not c.get("prediction") and keyf(c) in kept:
+            c["prediction"] = kept[keyf(c)]
     pending = [p for p in pending if keyf(p) not in keys] + changes
     save_pending(pending)
     return len(changes)
@@ -508,6 +744,11 @@ def option_label(attr, value):
 # --- push ----------------------------------------------------------------------
 def push(mg, cache, changes, progress=lambda f, t: None):
     """Writes changes, verifies each one, logs it. Returns list of (change, status, note)."""
+    if any(c.get("kind") == "winmentor" for c in changes):   # never written: they go to the operator's list
+        import operator_requests
+        rest = [c for c in changes if c.get("kind") != "winmentor"]
+        done = push(mg, cache, rest, progress) if rest else []
+        return done + operator_requests.send([c for c in changes if c.get("kind") == "winmentor"])
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     BACKUPS.mkdir(parents=True, exist_ok=True)
     backup, results = {"pushed_at": now(), "products": {}, "categories": {}, "other": []}, []

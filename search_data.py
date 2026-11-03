@@ -51,9 +51,11 @@ def per_product(prop, start, end, products):
             url_to_sku[u] = sku
     out = {}
     with closing(core.connect()) as c:
+        pid = _prop_id(c, prop)
         for page, clicks, impr, pos in c.execute(
-                "SELECT page, SUM(clicks), SUM(impressions), SUM(position * impressions) FROM gsc_pages "
-                "WHERE property = ? AND date BETWEEN ? AND ? GROUP BY page", (prop, start, end)):
+                "SELECT g.value, s.clicks, s.impr, s.pos FROM (SELECT page, SUM(clicks) AS clicks, SUM(impressions) AS impr, "
+                "SUM(position * impressions) AS pos FROM gsc_pages_c WHERE prop = ? AND date BETWEEN ? AND ? GROUP BY page) s "
+                "JOIN dict g ON g.id = s.page", (pid, start, end)):
             sku = url_to_sku.get(page)
             if not sku:
                 continue
@@ -61,13 +63,21 @@ def per_product(prop, start, end, products):
             o["impressions"] += impr or 0
             o["clicks"] += clicks or 0
             o["_pos"] += pos or 0.0
+        page_sku = {i: url_to_sku[v] for i, v in c.execute("SELECT id, value FROM dict WHERE kind = 'gsc_page'")
+                    if v in url_to_sku}
         best = {}
         for page, query, impr in c.execute(
-                "SELECT page, query, SUM(impressions) AS i FROM gsc_queries WHERE property = ? AND date BETWEEN ? AND ? "
-                "GROUP BY page, query", (prop, start, end)):
-            sku = url_to_sku.get(page)
-            if sku and impr > best.get(sku, ("", -1))[1]:
+                "SELECT page, query, SUM(impressions) FROM gsc_queries_c WHERE prop = ? AND date BETWEEN ? AND ? "
+                "GROUP BY page, query", (pid, start, end)):
+            sku = page_sku.get(page)
+            if sku and impr > best.get(sku, (0, -1))[1]:
                 best[sku] = (query, impr)
+        names = {}
+        winners = list({q for q, _ in best.values()})
+        for i in range(0, len(winners), 500):
+            part = winners[i:i + 500]
+            names.update(c.execute(f"SELECT id, value FROM dict WHERE id IN ({','.join('?' * len(part))})", part).fetchall())
+        best = {sku: (names.get(q, ""), n) for sku, (q, n) in best.items()}
     for sku, o in out.items():
         o["ctr"] = o["clicks"] / o["impressions"] if o["impressions"] else 0.0
         o["position"] = o.pop("_pos") / o["impressions"] if o["impressions"] else None
@@ -75,25 +85,33 @@ def per_product(prop, start, end, products):
     return out
 
 
-def daily(prop, url_key, start, end):
-    urls = page_urls(url_key)
+def _page_ids(c, urls):
     marks = ",".join("?" * len(urls))
+    return [r[0] for r in c.execute(f"SELECT id FROM dict WHERE kind = 'gsc_page' AND value IN ({marks})", urls)]
+
+
+def _prop_id(c, prop):
+    row = c.execute("SELECT id FROM dict WHERE kind = 'property' AND value = ?", (prop,)).fetchone()
+    return row[0] if row else -1
+
+
+def daily(prop, url_key, start, end):
     with closing(core.connect()) as c:
+        ids = _page_ids(c, page_urls(url_key)) or [-1]
         return pd.read_sql_query(
             f"SELECT date, SUM(clicks) AS clicks, SUM(impressions) AS impressions, SUM(position * impressions) AS pos_x_impr "
-            f"FROM gsc_pages WHERE property = ? "
-            f"AND page IN ({marks}) AND date BETWEEN ? AND ? GROUP BY date ORDER BY date",
-            c, params=[prop, *urls, start, end])
+            f"FROM gsc_pages_c WHERE prop = ? AND page IN ({','.join('?' * len(ids))}) AND date BETWEEN ? AND ? "
+            f"GROUP BY date ORDER BY date", c, params=[_prop_id(c, prop), *ids, start, end])
 
 
 def queries(prop, url_key, start, end, limit=200):
-    urls = page_urls(url_key)
-    marks = ",".join("?" * len(urls))
     with closing(core.connect()) as c:
+        ids = _page_ids(c, page_urls(url_key)) or [-1]
         df = pd.read_sql_query(
-            f"SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, "
-            f"SUM(position * impressions) * 1.0 / SUM(impressions) AS position FROM gsc_queries WHERE property = ? "
-            f"AND page IN ({marks}) AND date BETWEEN ? AND ? GROUP BY query ORDER BY impressions DESC LIMIT ?",
-            c, params=[prop, *urls, start, end, limit])
+            f"SELECT q.value AS query, s.clicks, s.impressions, s.pos_x_impr * 1.0 / s.impressions AS position FROM "
+            f"(SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, SUM(position * impressions) AS pos_x_impr "
+            f" FROM gsc_queries_c WHERE prop = ? AND page IN ({','.join('?' * len(ids))}) AND date BETWEEN ? AND ? "
+            f" GROUP BY query ORDER BY impressions DESC LIMIT ?) s JOIN dict q ON q.id = s.query ORDER BY s.impressions DESC",
+            c, params=[_prop_id(c, prop), *ids, start, end, limit])
     df["ctr"] = (df["clicks"] / df["impressions"] * 100).round(1).fillna(0)
     return df[["query", "impressions", "clicks", "ctr", "position"]]

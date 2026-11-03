@@ -3,3 +3,4 @@ pandas
 mcp>=2.3,<3
 google-auth-oauthlib>=1.2
 google-api-python-client>=2.100
+openpyxl>=3.1

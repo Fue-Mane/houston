@@ -10,15 +10,17 @@ How this file works:
 - **Houston v1** runs on Stefan's PC: Streamlit app, with the Catalogue section and Google Search Console.
 - **Store connection:** Magento 1 XML-RPC API, user `biomania-script` with role `catalog-read-update`. Writes happen only through Review and push. Each push backs up the old values, reads the change back and logs it.
 - **Storage:** everything is in `data/houston.db` (SQLite).
-- **Catalogue copy:** loaded 8 Oct 2026 14:24, live products only (516).
-- **Search Console:** connected 9 Oct 2026 (sc-domain:biomania.ro, signed in as nicoleta@biomania.ro).
-  - Data from 2025-06-10 to 2026-10-06, apart from a gap from 2026-06-23 to 2026-09-08.
+- **Catalogue copy:** loaded 22 Oct 2026 21:27, live products only (513).
+- **Search Console:** connected 9 Oct 2026, signed in as nicoleta@biomania.ro. The data Houston holds is from the property https://www.biomania.ro/ (corrected 31 Oct 2026: this line used to say sc-domain:biomania.ro).
+  - Data from 2025-06-10 to 2026-10-22, apart from a gap from 2026-06-23 to 2026-09-08.
   - The last-28-days totals match the Search Console graph.
 - **Claude's access:** read-only, through the Houston MCP connection in the Claude desktop app. Claude can also write this log. Claude cannot change the catalogue or reach the live store.
 - **Naming and meta work:** done for plant drinks (33), flakes (23), pasta (44), gnocchi (2), vinegars (6), cooking creams (5) and Happymais meta descriptions (4).
   - Next group is **Orez, 10 products**. The order of the remaining groups is in the 30 Sep session log §6.
-- **Google Analytics and Google Ads:** not connected yet.
-- **WinMENTOR link:** since 17 Oct 2026, a courier on the office PC uploads WinMENTOR data to Google Cloud Storage bucket `bwe` (project houston-511111) at logon and at 16:00. History is backfilled to 2026_08. Houston doesn't read the bucket yet.
+- **Google Analytics:** connected 9 Oct 2026 (property 390051981). **Google Ads:** not connected yet.
+- **WinMENTOR link:** since 17 Oct 2026, a courier on the office PC uploads WinMENTOR data to Google Cloud Storage bucket `bwe` (project houston-511111) at logon and at 16:00. History is backfilled to 2026_08.
+  - Houston's loader (`winmentor.py`) copies the zips into the `wm_*` tables. Last load 22 Oct 2026 01:39–01:46: 219 zips, up to the 21 Oct 16:00 run. Pages: WinMENTOR and Orders.
+  - The data is being validated before more is built on it: register at https://claude.ai/artifact/FHB6pT6FQ4e379MXfQiTRv.
 
 ## Decisions
 
@@ -38,12 +40,23 @@ How this file works:
   - **Stock rule:** a product's total stock is Depozit central plus VANZARI EN-GROS. All other warehouses are excluded (Stefan).
   - **Product codes** are exported as WinMENTOR internal codes, which match Magento SKUs. Catalogue and stock are also exported with EANs.
   - **Changes on the office PC** are made in person at the office, not through AnyDesk (Stefan).
+- **Sales channels, agreed 23 Oct 2026 (build plan step 2):** one channel per WinMENTOR sale document, first matching rule wins. The customer is GetVanzariExt c11 (fiscal code), joined by database + series + document number. The note is GetVanzariLuna c23 (field 24). Every channel table ends with a Total line.
+  1. Delivery note with every line at price 0 = sample; note containing \"donatie\" = donation. Neither is a sale.
+  2. Customer DANTE INTERNATIONAL SA (RO14399840): series BIO = eMAG wholesale; series V-MKTP = eMAG Marketplace.
+  3. Customer BEBETEI INVESTMENTS GROUP SRL (RO32742199) = BEBETEI.
+  4. Note contains EMAG or MKTP = eMAG Marketplace.
+  5. Note contains TELEFON = People offline, checked before SITE. Provisional: Stefan confirms with his mother.
+  6. Note contains SITE = Website.
+  7. Customer with a company fiscal code (not a 13-digit personal number) = B2B.
+  8. Return or correction (negative total) = the channel of the earlier invoice it cancels: same address, same total with the opposite sign.
+  9. Invoice to a person with no channel word, whose total with VAT matches a Magento order within 0.05 lei and is dated 0–14 days after it = Website. Orders already matched to a Website invoice aren't reused. Needs Magento orders in Houston (number, date, status, total; no names or addresses).
+  10. Anything else = Unknown: its own line, and listed in Data health.
 
 ## Open items
 
-- **Search Console gap, 2026-06-23 to 2026-09-08:** Google returned no rows.
-  - Check whether the Search Console graph shows data for those dates, under sc-domain:biomania.ro and under the https://www.biomania.ro/ property.
-  - Until it's explained, no comparison may span this window.
+- **Search Console gap, 2026-06-23 to 2026-09-08:** no data. Re-pulled on 24 Oct (0 rows); on 31 Oct Google sent nothing for these dates even with unfinished data allowed (test_gsc_gap.py), while the weeks on either side match Houston exactly.
+  - Treated as lost unless the Search Console graph for https://www.biomania.ro/ shows those dates later. Houston can't read sc-domain:biomania.ro (the sign-in is an unverified user there).
+  - No comparison may span this window.
 - `biomania-benchmark-2026-09-19.md` (the frozen benchmark) is missing from the project.
 - Test product `23347474775755848` ("Produs test termen expirare") is enabled and visible in catalogue and search.
 - `fara_gluten` is set on 3 of 516 live products, while 169 have "gluten" in the name.
@@ -221,3 +234,620 @@ Plant drinks, flakes, pasta, gnocchi, vinegars and cooking creams, plus canonica
 - **Backfill:** one zip per older month in `history/<database>/<yyyy_MM>.zip` up to 2026_08, plus `history/<database>/_lists.zip` (catalogue and customers). September and October stay in the daily files.
 - **Result:** first normal run and backfill ran without errors; files visible in the bucket (Stefan, 17 Oct 2026).
 - **Left out:** delegates and employees, empty lists (discount criteria, reception attributes), the unbilled order of 01.12.2024, reference lists.
+
+### 2026-10-21 19:28 — Houston plan written (12 Oct 2026, logged late)
+- **Plan:** `houston-plan.md`, a draft for Stefan to edit. Not logged on 12 Oct because the Houston connection was unavailable then.
+- **Order of work:**
+  - A: foundations (Magento orders without personal data, more GA4 reports including order numbers, Update all).
+  - B: first intelligence (product scorecard, search opportunities, effect of our changes).
+  - C: customer insight (seasonality, devices, guest vs logged-in, time of purchase, buyer groups).
+  - D: predictions tested on past data, plus alerts.
+  - E: competitors.
+- **Open decisions:**
+  - headline KPIs;
+  - pulling orders (GDPR fields, family member's OK);
+  - competitor data budget;
+  - first customer questions;
+  - daily automatic refresh.
+
+### 2026-10-21 19:29 — Houston database made compact (385 → 31 MB); backup to Google Drive
+- **Why:** `data/houston.db` had reached 385 MB (measured 17 Oct). About 95% was Google data: every row repeated the full page address, property and pull time, and the text was stored a second time in the indexes. The catalogue is about 10 MB.
+- **Change:** the three big tables (`gsc_queries`, `gsc_pages`, `ga4_landing`) now live in compact tables (`*_c`). Each page address, search, device, channel and property is stored once in `dict`. Views with the old names give the same columns, so SQL and Houston pages work as before.
+  - `ctr` is now calculated.
+  - The per-row `pulled_at` is gone; see `gsc_pulls` and `ga4_pulls`.
+- **Action links:** existing rows for Magento action links were folded into one line per day and channel. The January 2026 re-pull is no longer needed.
+- **Safety:** each table's totals were checked before its old version was removed. A full copy was kept as `data/houston-before-compaction.db`; delete it after a few days if everything looks right.
+- **Tested first:** on a 404 MB copy at the same scale, totals and sampled rows were identical, and the file went to 38 MB.
+- **Result on Stefan's PC, measured 21 Oct 2026:** 31.0 MB.
+- **Backup button:** added in the sidebar. It zips a clean snapshot (database, push backups, uploads, work log; never secrets) into a Google Drive folder and keeps the newest 8. First backup: 21 Oct 2026 19:23, `G:\My Drive\Houston Database\`, 7.9 MB.
+- **GitHub:** `data/` and `secrets/` are excluded by `.gitignore` (Stefan).
+
+### 2026-10-21 19:44 — Claude can read Houston's code (read-only)
+- **New tools in `mcp_server.py`:** `list_code_files`, `read_code_file` and `search_code`. Claude reads the code on Stefan's PC directly, so it always sees the current version, including edits made with Copilot.
+- **Never visible:** `data/`, `secrets/`, `.venv`, `.git`, backups, and any file named like a secret, token, key or credential. Nothing in these tools can write.
+- **Tested live, 21 Oct 2026:**
+  - All 12 code files are byte-identical to the 17 Oct build (fingerprints match).
+  - `secrets/google_token.json`, `../houston/secrets/client_secret.json` and `data/houston.db` were all refused.
+  - A search for "refresh_token" found only `google_auth.py`, not the token file.
+- **How to use:** before changing code, Claude runs `list_code_files`. A different fingerprint means the file changed since Claude last saw it.
+
+### 2026-10-21 20:06 — Google data in houston.db is back at the 9 Oct state
+- **Found:** the current `houston.db` holds Google data only up to the pulls of 9 Oct 2026 (GA4 last pulled 16:17, Search Console 15:44).
+- **Counts on 17 Oct, before the reorganisation** (`describe_database`):
+
+  | Table | 17 Oct | Now |
+  |---|---|---|
+  | `ga4_items` | 33,559 | 11,420 |
+  | `ga4_site_search` | 9,077 | 0 |
+  | `ga4_totals` | 494 days | 486 days |
+  | `ga4_pulls` | 71 | 39 |
+  | `gsc_pulls` | 66 | 54 |
+
+- **Likely cause:** the database file was replaced by an older copy sometime between that reading and the reorganisation. The reorganisation doesn't touch those tables. Cause unknown.
+- **Not affected:** the change log (39 entries both times) and the catalogue copy (9 Oct 15:09 both times).
+- **What's missing is re-pullable** from Google: press Update on both Google pages.
+
+### 2026-10-22 03:55 — WinMENTOR validation, step 1: inventory checked
+- **Register:** Claude Doc "Validation register: WinMENTOR data in Houston", https://claude.ai/artifact/FHB6pT6FQ4e379MXfQiTRv (brief: https://claude.ai/artifact/PMQf5PW1ufESZXjaMnNWrt). 2 of 33 checks verified, 3 partly, 28 open.
+- **Delivery (D1, verified):** 219 zips in `wm_files`, each loaded once, none failed: 206 month zips (BIOMANIA 114, BIO2019 72, BIO2025 20), 3 list zips, 10 daily zips (17 Oct 18:00 to 21 Oct 16:00). 1,711 files in the manifests: 24 not read (locked), 1,687 loaded with no line-count difference. 1,486 stored copies, 1,667,663 lines, agree with their manifests.
+- **Months (D2, verified):** all 7 monthly lists hold every month of every database. 25 empty copies, all BIOMANIA: 2020_08 and 2020_09 (BIOMANIA stops partway through July 2020; BIO2019 holds those months) and transfers 2011_04 to 2012_02 (transfers begin 1.3.2012).
+- **Locked reads (D3, partly):** every 16:00 run and 20 Oct 17:28 could not read sales_ext, goods_in and customers; the morning runs read everything. So stored sales_ext, goods_in and customers are as of the morning run. Run triggers and any failed runs need `export.log`.
+- **Courier (D5, partly):** every manifest carries script_version "1 (2026-10-19)", including the 17 Oct runs. Byte check on the office PC with Get-FileHash; expected hashes in the register.
+- **Blind spot:** the courier records exceptions, not DocImpServer's error code. No sign of a short read in the 10 daily runs.
+
+### 2026-10-22 04:14 — WinMENTOR validation, step 2: stock arithmetic
+- **Stock arithmetic (register I1, verified):** stock on one photo + receptions − sales ± transfers = stock on the next, per product. 19→20 Oct, per product and warehouse code with sales_ext: all 172 product-warehouse pairs with movements balance. 19→21 Oct with sales_month: all 214 products sold balance. 17→19 Oct: all balance except the 22 products on invoice 69928.
+- **Columns confirmed by it:** stock c0 code, c4 quantity, c11 warehouse code; sales_ext c1 day, c3 code, c4 quantity, c7 warehouse code; sales_month c1 day, c3 code, c5 quantity; transfers c0 from, c1 to, c3 date, c4 code, c6 quantity; receptions c12 quantity.
+- **Invoice 69928, open:** DANTE INTERNATIONAL SA (RO14399840, eMAG), 19 Oct, 22 products, 1,192 units, 20,586 lei. Stock did not move, e.g. 900 apple vinegar 0036185 billed against 117 in stock. Houston counts them: vinegar shows 1,230 units sold in Oct 2026, 900 of them on this invoice. Question for the operator.
+- **Timing:** documents are entered late (a reception dated 15 Oct entered on 19 Oct) and drop out (invoices 69960 and 69963 of 20 Oct gone on 21 Oct). The stored sales_ext (21 Oct 08:41) still holds those two until the next morning read.
+- **Not stock:** sale codes 704 (packing and delivery fee) and 667 (eMAG voucher discount), and codeless flag-S lines; codeless stock items (packing materials, office equipment, vehicles).
+- **Correction to the previous entry:** the register had 32 checks, not 33 (2 verified, 3 partly, 27 open). With 4 internal-check rows added it has 36: 3 verified, 8 partly, 25 open.
+
+### 2026-10-22 14:00 — WinMENTOR documentation: wrong product, and the search tool fails
+- **The two PDFs in `docs/` are for WinMENTOR ENTERPRISE**, not the classic WinMENTOR the office runs: the API doc covers the Enterprise REST server, and the user guide is the Enterprise guide. Useful for what accounting terms mean (AE, invoices to come), not for which column of a list is which.
+- **The matching manual for classic WinMENTOR's DocImpServer** is on WinMENTOR's own site: https://download2.winmentor.ro/WinMentor/Documentatie/24_DocImpServer/Functions%20for%20interfacing%20other%20applications%20with%20WinMENTOR.doc. Asked Stefan to save it in `docs/` as text.
+- **Houston defect:** since `docs/` was added, `list_code_files` and `search_code` fail with a bare error, while `read_code_file` still opens a named file. For the build chat.
+
+### 2026-10-22 14:32 — DocImpServer manual read and turned into a skill
+- **Manual:** `docs/winmentor-api.txt` is now the DocImpServer manual for classic WinMENTOR (Rev.1.0, 24.05.2024). It describes the stock list, the catalogue, the customer list, the balances and both sales lists, but gives only the names of receptions, transfers, goods in, stock by warehouse, stock lots, special prices and money in; money out is not in it at all.
+- **Against the data:** the stock list and the second sales list (GetVanzariLuna) match the manual. The first sales list (GetVanzariExt) does not: the installed version has no document-prefix field and a different order further on. Positions come from the data, not the manual.
+- **Finds:** each catalogue read already carries both codes (c9 is the other code; same name and swapped codes on all 7,086 lines), so the line-order pairing is consistent and could be simpler. The catalogue marks services (c14 = Da, 256 in BIO2025). Stock selling price with VAT = price × (1 + VAT) on every line. The manual says a failed read is reported through the Error parameter, which the courier never reads.
+- **Skill:** built `winmentor-docimpserver` (SKILL.md + functions.md) for Stefan to upload; it records each column's status as of 22 Oct.
+- **Houston defect, still open:** `list_code_files` and `search_code` still fail after the PC came back; `read_code_file` works.
+
+### 2026-10-22 15:15 — Search fixed; eMAG invoice 69928 checked against receptions
+- **Search fixed.** Stefan replaced `_code_files`, `list_code_files` and `search_code` in `mcp_server.py`: the walk no longer enters data/, .venv, .git or backups, and a file that can't be read is skipped instead of failing the tool. `search_code` now finds text in `docs/winmentor-guide.txt`; `list_code_files` lists 20 files, none skipped.
+- **eMAG invoice 69928, more evidence:** 19 of its 22 products had enough stock on 19 Oct and still did not move, so the whole invoice was entered without moving stock. Only three were short: the Baule Volante apple vinegar (117 in stock, 900 invoiced), the expanded rice (6, 72) and the lentil fusilli (0, 9). The vinegar's last reception was 900 bottles from HEALTION on 4 Sep; none in October up to 21 Oct 16:00.
+- **What decides the effect on Houston:** the document that later takes these goods out of stock. If it is not a sale line, Houston counts the units once and only the stock lags. If it is a sale line, Houston counts eMAG twice. Watch the 22 products in the next stock photos.
+
+### 2026-10-22 15:26 — secrets/ folder corrupted after the PC switched off
+- **`secrets/` reported corrupted by Windows** after the PC switched off earlier on 22 Oct. Houston's WinMENTOR page now asks for `secrets/client_secret.json`. Most likely cause: a power cut while Houston was rewriting `secrets/google_token.json` (it does so on every Google token refresh). The old `list_code_files`/`search_code` walked into every folder, secrets/ included, which fits their failing from that point; the new version skips secrets/.
+- **Database intact:** `SELECT * FROM pragma_integrity_check` on houston.db returns ok.
+- **Fix given to Stefan:** close Houston, VS Code and Claude Desktop; `chkdsk D: /f` as administrator; then either the two files are back, or re-download the Desktop OAuth client JSON (or create a new Desktop client) and sign in to Google again.
+- **eMAG invoice 69928:** the stock list's reserved-by-orders field is 0 for all 22 products in every photo (3 lines in the whole list show any reservation, 7 units). Nothing is reserved for eMAG in WinMENTOR, so its goods count as free stock until they ship.
+
+### 2026-10-22 16:04 — secrets/ fixed; new file-search code stays
+- **`secrets/` fixed by Stefan.** The Google sign-in files are back in place.
+- **Keep the new `mcp_server.py` code** (`_code_files`, `list_code_files`, `search_code`, saved 22 Oct 15:06). It shows the same files as before, but never walks into data/, secrets/, .venv, .git or backups, and skips an unreadable file instead of failing. Build chat: start from this version, not an older copy.
+
+### 2026-10-22 16:16 — WinMENTOR guide read; terms skill built
+- **Guide read** (`docs/winmentor-guide.txt`, WinMENTOR ENTERPRISE): receptions, supplier delivery notes and their invoices, transfers, price changes, stock increases, sales invoices, partner balances (408/418), accounting types. Concepts carry over to classic WinMENTOR; menus don't. Built the `winmentor-terms` skill from it.
+- **What it settled, with the data:** the two quantity fields of GetReceptii (invoiced vs received) are equal on all 3,200 BIO2025 lines, so either can be used; BIO2025 receptions have no negative (return) lines; AE = delivery note, invoiced later through 418; discounts are separate invoice lines, which fits the flag-S eMAG lines with negative prices (69930, 69931).
+- **eMAG invoice 69928, 22 Oct 16:00:** still in the sales lists, its goods still not out of stock, no vinegar received (stock 85). The DocImpServer manual's ExistaFactura separates processed from unprocessed invoices; "unprocessed" fits everything seen. If so, processing it drops all 22 products at once with no new sale line, and Houston counts the units once.
+- **Today's runs:** 08:39 read everything; 16:00 locked out of the usual five files.
+- **DocImpServer skill updated:** GetVanzariLuna field 11 = invoice date; GetReceptii's two quantities equal; ExistaFactura added.
+
+### 2026-10-22 16:26 — GetVanzariExt against GetVanzariLuna, September 2026
+- **The two sales lists, September 2026 (BIO2025):** every one of GetVanzariExt's 3,627 lines is in GetVanzariLuna (same document, series, product, quantity, day). GetVanzariLuna's 79 extra lines (298 units) are all delivery notes at price 0: 19 documents (7086–7121) to BEBETEI INVESTMENTS GROUP SRL shops (REBREANU, MALL VITAN, BRASOV, Vivo-Constanta…). No later invoice bills them (checked AE 7100). They do leave stock (AE 7183, 20 Oct, balanced against the photos).
+- **No double counting:** Carrefour, Mega Image and Sezamo get priced delivery notes with their order number, which are in both lists; their invoices carry only negative discount lines, no products. Each delivery is counted once.
+- **October:** also a donation on delivery note AE 7135 (1 Oct, 755 units, "Conform contract donatie"), only in GetVanzariLuna. Odd: AE 7183 was in GetVanzariExt on 21 Oct 08:41, gone by 22 Oct 08:39, still in GetVanzariLuna.
+- **Effect on Houston:** units sold (GetVanzariExt) are right, but the order suggestion misses goods that leave free. September, given away against sold: ECO SOS DE ROSII picant IRIS 340G 39/27, ECO BAUTURA DE OVAZ CU CACAO 1L 37/19, ECO BAUTURA DIN NUCA DE COCOS BARISTA 1L 37/59. Decision for Stefan; question for the operator: what the price-0 delivery notes are.
+
+### 2026-10-22 16:43 — Price-0 delivery notes: BEBETEI and Farmacia Tei
+- **Correction to the previous entry:** the price-0 delivery notes go to BEBETEI INVESTMENTS GROUP SRL shops and also to FARMACIA TEI SRL shops (BIHARIA GO, POPESTI; matched through each customer's branch list in GetListaClienti). September: 15 of the 19 notes (284 units) BEBETEI, 4 (14 units) Farmacia Tei. October to 22 Oct: 22 notes, 271 units BEBETEI (7137 to 7183); 3 notes Farmacia Tei (7136, 7162, 7163).
+- **None of them has an order number** (the order field and the order note are empty), unlike the priced notes to Carrefour and Mega Image. Shop BRASOV exists for both BEBETEI and Carrefour; AE 7140 counted as BEBETEI.
+
+### 2026-10-22 16:50 — Simpler route for the order suggestion; mother's sales Excel
+- **Money in is no substitute for sales:** GetIncasariLuna lines hold a number, the payment date, the invoice paid and the amount (e.g. 03.09.2026, F.BIO69260, 201,1 lei). No products or quantities.
+- **Proposed to Stefan, not decided:** base the order suggestion on everything that left the warehouse, GetVanzariLuna (invoices plus all avize, returns included), leaving out donations (marked "Conform contract donatie"). Keep units sold on GetVanzariExt. Needs nothing from the operator.
+- **Next source:** the Excel Stefan's mother uses to gauge sales. Stefan will ask for it; one month of it against Houston is the independent check of Houston's sales figures. She may also answer the free-avize and eMAG 69928 questions faster than the operator.
+
+### 2026-10-22 17:22 — Samples answer; Houston structure being replanned
+- **Operator's answer on the price-0 avize** (e.g. 7137 to 7183, BEBETEI shops): "sunt mostre spre testare catre buyer", samples for the buyers to test. Stefan: they are not sales.
+- **Stefan paused the Orders page** to rethink Houston's structure: supplier-first ordering (active products, then sales and stock, then the supplier's template by EAN), a sales page split by channel first, a link between the Magento and WinMENTOR catalogues, and new sections (data health, customers, marketing, product page). Planning only, nothing built.
+
+### 2026-10-22 18:40 — Planning Houston: codes, suppliers and channel tags measured
+- **Internal codes, Magento against WinMENTOR (22 Oct):** of 513 website products, 498 SKUs equal a BIO2025 internal code exactly, 6 match only once a trailing space is removed (e.g. "0009336 "), 9 have no WinMENTOR code (To Go 3-packs 3028871/3 to 3028873/3, cooking creams 3019001 and 3019005, others). Of the 498, EAN agrees on 459, differs on 10, missing on one side on 29.
+- **Sold but not on the website:** of 388 products sold at a price in Aug to Oct 2026, 9 have no website product under the same code, all code problems: To Go singles vs website 3-packs; A76PP002340IR vs website A76PP0023401IR; cooking creams 0027872 and 0026405 vs website 3019005 and 3019001 (probably the same products); 591714 with a lost leading zero; Z099999 PALETI not marked as a service; A07CB091500IR. Stefan: there are no B2B-only products, so every case is a data-health item.
+- **Magento's Producător is the manufacturer, not who delivers.** Pierpaoli, A.S.T.R.A Bio and CLECA match the receptions; most BV&FdL S.r.L. and La Finestra sul Cielo products were last delivered by HEALTION Srl (some earlier by PROBIOS); 9 products listed under ABAFOODS were last delivered by HEALTION.
+- **Channel tag in WinMENTOR:** GetVanzariLuna field 24 is a payment note on each invoice. Sep 2026: RAMBURS SITE 28 and CARD SITE 13 (website), CARD EMAG 112 and RAMBURS EMAG 7 (eMAG marketplace orders, mostly people), OP + shop 211 (B2B), RAMBURS SITE COMANDA TELEFONICA 2 (phone), 2 empty.
+- **Stefan's decisions:** active = active in Magento, no exceptions and no "don't reorder" switch; channels = website, people offline (phone, email), B2B, with eMAG and BEBETEI as their own channels at full detail; data health is built first, with the joined product list.
+
+### 2026-10-22 20:07 — Product list and data health designed
+- **Design doc for the build chat:** "Houston: product list and data health", https://claude.ai/artifact/2QT1RPcUTZHJnJSd4pZw49. One row per website product (513), matched to WinMENTOR by code with the EAN as a cross-check; data health checks measured on 22 Oct.
+- **Problems costing sales now:** 17 products show out of stock online while the warehouse has them (Isola Bio rice and hazelnut drink 250 ml: 476 in stock); 40 show in stock online with none in Depozit central and VANZARI EN-GROS, including top sellers (Baule Volante baking powder 18g: 543 sold in 3 months).
+- **Other counts:** EAN differs on 8 matched products, missing or cut short on one side for 27, missing everywhere for 4; 3 EANs on two website products each; 89 active products with no stock and no sales in 3 months; 86 with no delivery since Jan 2025.
+
+### 2026-10-22 20:17 — Data health and Product list coded
+- **Data health and Product list coded for Houston** (given to Stefan as houston-data-health.zip, 22 Oct): new `health.py` (builds `health_products`, runs the checks into `health_issues`, logs `health_runs`), new `views_health.py` (pages Data health and Product list, in a new "Data" menu section), updated `app.py`, and `apply_health_patch.py`, which adds `health.rebuild_quietly(...)` after `wm.update` in views_orders.py and after `core.load_catalogue` in views.py (keeps .bak copies).
+- **Rules in the code:** active = enabled on the website; a website code/N is N of WinMENTOR's single; sold = priced lines of GetVanzariLuna in the current month and the 2 before (samples at price 0 out); stock = Depozit central + VANZARI EN-GROS from the newest photo; supplier = last reception. EAN checks skip packs.
+- **Tested** on a small test database built from real cases (all 13 checks fire as expected; disabled products, services and samples ignored); the patch script tested on copies of both files, CRLF kept, safe to run twice.
+- **Build chat:** start from these versions of app.py, views.py and views_orders.py.
+
+### 2026-10-22 20:46 — Data health: cockpit panel, explanations, SKU wording
+- **Data health page, second version** (houston-data-health-2.zip, 22 Oct): replaces `health.py` and `views_health.py`. Three tabs: Pre-flight (a cockpit panel: master warning, a gauge for checks clear, a bar for website products with no problems, one light per check grouped Stock / Matching / EAN / Suppliers and activity; pointing at a light shows what it checks), Problems (the lists), and How each check works (plain explanation of every check).
+- **Each check now carries** a plain explanation, a group and a level: red "warning" for the two stock checks (cost sales today), amber "caution" for the rest.
+- **"Code" renamed SKU** everywhere on the pages and in the problem texts; the match column reads SKU, SKU with space removed, pack of N, or not found.
+- **The Data pages re-run the checks themselves** when the catalogue or WinMENTOR data is newer than the last run (`health.newest_data()`).
+- **Not installed yet on Stefan's PC:** the automatic run after updates. views.py and views_orders.py still have their old fingerprints (a2885c68da, fb8c3619c3), so apply_health_patch.py hasn't run.
+- **His first run (20:25):** 513 products, 543 problems: 17 out of stock online but in the warehouse, 33 in stock online with none, 6 / 6 unmatched, 6 SKU spaces, 8 / 25 / 2 / 4 / 6 EAN, 81 dormant, 77 no delivery, 272 producer vs supplier.
+
+### 2026-10-22 20:57 — Data health: checklist design A and light/dark switch
+- **Data health page, third version** (houston-data-health-3.zip, 22 Oct): Stefan picked design A. The Pre-flight tab shows a checklist (one small red or green light per check, name, dotted line, count or OK, a thin bar with one segment per check; hovering a check shows its plain explanation). Under it, the product dropdowns per check with a red dot in the label. A second tab, How each check works. No animation. The cockpit panel is gone.
+- **Light and dark switch:** a "Dark theme" toggle at the bottom of the sidebar (`app.py`). It sets Streamlit's theme options at run time and reruns once; the choice is saved in Houston's settings (`theme`). config.toml only gives the starting theme. Tested on Streamlit 1.66: the whole app switches in one click, and the checklist follows the theme.
+- **Tested in a real Streamlit server** with test data: checklist, dropdowns, How tab and the automatic re-run on new data all work.
+
+### 2026-10-22 21:18 — Data health: checklist rows open as dropdowns
+- **Data health checklist, fourth version** (houston-data-health-4.zip, only `views_health.py`, 22 Oct): each red row of the checklist is now itself the dropdown. Click it and it opens under the row with the plain explanation and a scrollable table of SKU, product and what's wrong. Green rows don't open. The Run pre-flight checks button sits to the right of the checklist. Tested in a real Streamlit 1.66 server, dark and light.
+
+### 2026-10-22 21:53 — Products pages merged; WinMENTOR edits through Review and push to the operator
+- **Products pages merged** (houston-products-merge.zip, 22 Oct). Catalogue > Products is now the only product table (`views_products.py`), and Data > Product list is gone.
+  - It has a View switch with two column presets: SEO (name, meta title, meta description, search columns) and Data inspection (name, website EAN, producer, SKU in WinMENTOR, EAN in WinMENTOR, warehouse stock, in stock online, sold in 3 months, last delivered by). Columns can still be added or removed.
+  - "Show only products with" now also lists the website-side pre-flight problems (from the last run). Sold in WinMENTOR but not on the website, and SKU with a stray space, stay on Data health only.
+- **Every edit goes through Review and push** (Stefan's rule).
+  - Website columns and the In stock online flag are written to Magento, as before.
+  - WinMENTOR columns (EAN in WinMENTOR, WinMENTOR name) become changes of kind `winmentor`. Pushing them writes nothing: core.push hands them to `operator_requests.send()`, which logs them as "Sent to the operator" and puts them on the operator's list (Data health, tab For the operator, with a CSV download). Each one closes by itself when a later WinMENTOR load shows the new value (checked in every pre-flight run).
+  - Stock, sales and deliveries can't be edited: they come from WinMENTOR documents.
+- **apply_products_patch.py** (run once): core.push routes the winmentor kind; views.py labels it in Review, counts it as done when sent, and doesn't need the store connection when only WinMENTOR changes are pushed.
+- The old `views.page_products` is still in views.py, unused. Remove it in a later tidy-up.
+- Tested in a Streamlit 1.66 server with test data: both presets, a problem filter, the operator tab, and the send-then-close flow.
+
+### 2026-10-22 22:28 — Merge undone; Product list back under Data with click-to-open product window
+- **Merge undone** (houston-product-list.zip, 22 Oct). Stefan found the merged Products page too cluttered. Catalogue > Products is back to the original `views.page_products`, with no View switch, and `views_products.py` should be deleted.
+- **Data > Product list is back**, under Data health (`views_product_list.py`).
+  - Filters: search (name, SKU, EAN), problems (pre-flight checks), last delivered by, warehouse stock.
+  - Clicking any cell of a product opens the product window.
+  - An "Edit in the table" switch turns the cells editable. The website EAN, producer and in-stock flag are written to the store; EAN in WinMENTOR and WinMENTOR name go to the operator's list. All of it goes through Review and push.
+  - The For the operator tab stays on Data health.
+- **Product window** (`product_card.py`): `show(sku)` opens a dialog with two tabs. Overview has the pre-flight problems, Website facts and WinMENTOR facts. Stock and sales reuses the Orders window body through `views_orders.product_dialog.__wrapped__`. `clickable_table()` is a read-only `st.dataframe` with single-cell selection: one click on any cell opens the row's product, so no Open column is needed.
+- **Streamlit limits found while testing (1.66):**
+  - The editable table (`st.data_editor`) has no click events, so editable tables need the browse/edit switch.
+  - After closing the window with ×, clicking the same product again right away doesn't register; a different product, or closing with Esc, works.
+- **Proposed, not built:** the same click-to-open and browse/edit switch on Catalogue > Products (a click would also move the attributes editor below to that product, replacing the Open column) and on Orders.
+
+### 2026-10-22 22:39 — Product window = Orders window + Google Search + Google Analytics
+- **Product window rebuilt** (houston-product-window.zip, only `product_card.py`, 22 Oct). Stefan rejected the facts-first version: the window must be the Orders window and more. One scroll, in this order:
+  1. The Orders page window (stock figures, units sold per month, year against year, stock by warehouse, cost, dated stock lines).
+  2. Google Search for the product's page (`views.search_tab`).
+  3. Google Analytics: visits that started on the product's page, from `ga4_landing_c`, with last-90-day visits, purchases and revenue, and a monthly chart by channel.
+  4. Data checks: the pre-flight problems, with website and WinMENTOR data collapsed underneath.
+- **Not built yet, said in the window:** sales forecast (comes with ordering) and creator videos (need the Instagram and TikTok connection).
+- **Data note:** `ga4_items` (views, add to cart and purchases per product) only runs from 10 Jun to 31 Oct 2025 in Houston, so the window uses landing-page visits instead. Why item data stops there hasn't been checked.
+
+### 2026-10-22 22:56 — Product window faster; Products opens it on a click
+- **Product window faster, and click-to-open on Catalogue > Products** (houston-click-fix.zip, 22 Oct).
+- **Window in three parts, one shown at a time** (Sales and stock / Google / Data checks), so the first open only runs the Orders window. The WinMENTOR lookups in it (`product_details`, `monthly_series`, `ytd`, `magento_names`) are kept in memory per product with `st.cache_data`, keyed on the newest WinMENTOR load and catalogue load. Reopening a product is instant: 0.2 s against 2.5 s in a test with stand-in slow lookups. The window shows "Opened in X s" at the bottom, to measure where it is still slow.
+- **Where the time probably goes, not yet measured on Stefan's PC:** `wm_sales_by_ean_month` is a view over all 693,727 sales lines. A per-EAN query uses the codes index, then scans that database's lines because of `TRIM(c3)`: about 0.1 s each on a same-size copy. An index on `(company, TRIM(c3))` didn't change the plan.
+- **Stuck highlight fixed:** `clickable_table` gives the table a new key after each click, so no cell stays selected. In a test, the same product could be reopened 8 times out of 8.
+- **apply_click_patch.py** (run once) changes `views.page_products`: the Open column goes, and an "Edit in the table" switch is added. Off, a click opens the product window and moves the attributes editor below to that product; on, the table is editable as before.
+
+### 2026-10-22 23:24 — Houston build plan written
+- **Build plan written:** `houston-build-plan.md`, for the project files. It sets the order of work, replacing the order of `houston-plan.md` (12 Oct):
+  1. Data health and product list (done 22 Oct)
+  2. channel rules
+  3. Sales page
+  4. ordering, supplier first
+  5. product page
+  6. customers
+  7. social
+- It also records the rules every step follows:
+  - Active = enabled on the website.
+  - Stock = Depozit central + VANZARI EN-GROS.
+  - Supplier = last reception.
+  - Samples and donations are not sales.
+  - Every change goes through Review and push; WinMENTOR changes go to the operator's list.
+  - A click on a product opens its window, and editable tables have an "Edit in the table" switch.
+- **One fresh chat per step.** Each starts by reading the plan, this log and `list_code_files`.
+
+### 2026-10-23 19:50 — Channel rules (step 2): payment-note coverage measured for October, rules proposed (not agreed)
+- **Data:** BIO2025, 2026_10, copy of 23 Oct 17:10 (days 1–23). GetVanzariLuna (`wm_sales_month`) and GetVanzariExt (`wm_sales_ext`), one copy each.
+- **Columns used:** GetVanzariLuna c23 = note (field 24), the same on every line of a document; c13 type (F, AE), c14 series (BIO, V-MKTP), c2 number, c7 unit price without VAT, c9 document total with VAT, c12 VAT rate. c0 (partner) is empty on every line, so GetVanzariLuna doesn't name the customer. GetVanzariExt c11 = customer fiscal code, c19 series; names from `wm_customers` (c3 fiscal code, c2 name).
+- **Documents:** 361. Not sales: 25 delivery notes with every line at price 0 (samples) and AE 7135 (donation). 335 sale documents, the same 335 in GetVanzariExt. Series + number never repeats in BIO2025 (across type or month), so a channel set per document reaches GetVanzariExt's lines.
+- **Note coverage:** text on 331 of 335. It names the channel on 103: SITE 16, EMAG or MKTP 87, TELEFON 0. That is about 3% of October's value without VAT. The rest: OP or a shop name 173 (BEBETEI 114, Farmacia Tei 44, No Sugar Shop 13, Danucol 1, a person 1); an order number 32 (delivery notes to Mega Image 15, Carrefour 10, Sezamo 5; invoices to DANTE 2); rebates, recall credits and returns 23; empty 4. The shop name doesn't say which company: OP BIHARIA is BEBETEI, OP BIHARIA GO is Farmacia Tei.
+- **Fiscal codes:** DANTE INTERNATIONAL SA RO14399840, BEBETEI INVESTMENTS GROUP SRL RO32742199, FARMACIA TEI SRL RO9417, CARREFOUR ROMANIA SA RO11588780, MEGA IMAGE SRL RO6719278, SEZAMO S.R.L. RO50031526, NO SUGAR SHOP SRL RO31646789, DANUCOL SRL 30960499.
+- **Website check, 1–7 Oct, against the Magento export of 9 Oct:** 9 completed website orders. WinMENTOR: 8 invoices noted SITE (69733 = #100015882-1, 184.36 lei; 69703 = #100015879, 44.87 lei); 3 CARD SITE, as Magento's 3 card orders. F.BIO69730 (5 Oct, no note, delivery fee line, 63.50 lei with VAT) closes the gap to Magento's total within 0.02 lei. So the note missed about 1 website order in 9 that week. A total match, not order by order.
+- **Proposed rules, per document, first match wins (awaiting Stefan):** 1. delivery note with every line at price 0 = sample; note with \"donatie\" = donation; neither is a sale. 2. customer DANTE = eMAG wholesale, except series V-MKTP = eMAG Marketplace. 3. customer BEBETEI = BEBETEI. 4. note EMAG or MKTP = eMAG Marketplace. 5. note TELEFON = People offline (before SITE: the phone note reads RAMBURS SITE COMANDA TELEFONICA). 6. note SITE = Website (catches RAMBUIRS SITE). 7. company fiscal code (not a 13-digit personal number) = B2B. 8. otherwise Unknown, listed in Data health.
+- **October under them (lei without VAT):** BEBETEI 125 docs 107,295; B2B 93 docs 44,703; eMAG wholesale 5 docs 28,797; eMAG Marketplace 87 docs 3,365; Website 16 docs 1,419; People offline 0; Unknown 9 docs 339 (0.2%). Unknown = 4 invoices to people with no note (incl. 69730), 1 \"PLATA OP\" to a person, 4 returns or corrections to people. September under the same rules: 9 of 481 documents Unknown.
+- **For step 3:** GetVanzariExt can list a sample (AE 7092, Sep, \"Mostra spre degustare Natural Target\", price 0), so the sample rule must run on both lists.
+- **Not seen in Sep or Oct:** any note for email orders. \"CARD POS\" once in Sep (69272); meaning unknown.
+
+### 2026-10-23 20:08 — Channel rules 1–8 agreed; website orders checked against Magento, 1–23 Oct
+- **Agreed by Stefan, 23 Oct:** channel rules 1–4 and 6–8 as proposed in the previous entry. Rule 5 (note TELEFON = People offline) agreed for now, to confirm with his mother.
+- **Magento, Sales → Orders, status Complete (Stefan's screenshots, 23 Oct):** 9 orders for 1–7 Oct, 18 for 1–23 Oct (#100015879 to #100015897; #100015895 not among them).
+- **All 18 are in WinMENTOR,** matched by total with VAT, invoiced 0–7 days after the order. 17 match exactly; #100015885 is 63.52 against invoice 69730 at 63.50.
+  - 15 sit under SITE notes.
+  - #100015885 → 69730, no note.
+  - #100015888 → 69840, note \"PLATA OP\" (bank transfer, invoiced 4 days after).
+  - #100015889 → 69843 (RAMBURS SITE, wrong price), cancelled by 69967 (\"CORECTIE FACTURA ERONATA\") and re-issued as 69968 with no note.
+- **So the Website line** (16 invoices, 1,419 lei without VAT) holds 15 of the 18 orders plus the cancelled 69843. The 18 orders come to 1,704 lei without VAT (2,010.49 with VAT in Magento).
+- **#100015893** (6.17 lei, keyboard-mash name) looks like a test, but it was invoiced (69947, CARD SITE), so it counts.
+- **Returns and corrections to people, October:** 3 of 4 are the exact negative of an earlier invoice to the same address.
+  - 69967 ↔ 69843 (SITE).
+  - 69702 ↔ 69606 (SITE, cited in its note).
+  - 69993 ↔ 69875 (CARD EMAG).
+  - 69816 (\"RETUR COLET DETERIORAT\") has no earlier invoice to its address in Jul–Oct.
+- **Other months:** 3–10 positive invoices to people land in Unknown each month, Oct 2025 to Sep 2026. How many are website orders can only be told against Magento's order list.
+- **Proposed to Stefan, not decided:** two rules before Unknown.
+  - (a) A return or correction takes the channel of the earlier invoice it cancels: same address, same total with the opposite sign. WinMENTOR data only.
+  - (b) An invoice to a person with no channel word whose total matches a Magento order (within 0.05 lei, invoiced 0–7 days after) = Website. Needs Magento orders in Houston (number, date, total, status; no names or addresses).
+  - With both, October's Unknown drops from 9 to 3: 69719 and 69929 (no Magento order), and 69816.
+
+### 2026-10-23 20:24 — Channel rules 8–10 agreed; Magento orders API test prepared
+- **Agreed by Stefan, 23 Oct:** the returns rule and the Magento-match rule (now rules 8 and 9; Unknown is rule 10). Channel tables get a Total line. Full rule set in Decisions.
+- **Correction to the previous entry:** not all 18 orders were invoiced within 7 days. 69968, the re-issue for #100015889 (order 10 Oct), is dated 20 Oct, 10 days after. A 7-day window misses it, so the Magento-match window is 14 days.
+- **October under all ten rules,** with the 18 Magento orders from the screenshot standing in for the orders pull (lei without VAT):
+  - BEBETEI 125 documents, 107,294.93
+  - B2B 93, 44,703.13
+  - eMAG wholesale 5, 28,796.52
+  - eMAG Marketplace 88, 3,335.33 (incl. return 69993)
+  - Website 21, 1,655.46: the 16 SITE invoices, 69730, 69840 and 69968 by Magento match, and returns 69967 and 69702. It is 1,704.02 for the 18 orders minus 48.56 for 69702, a return of the September order invoiced as 69606.
+  - People offline 0
+  - Unknown 3, 132.53: 69719 and 69929 (no Magento order), 69816 (a return with no original found)
+  - Total 335, 185,917.90
+- **Magento orders API:** the role's resource list (Stefan, 23 Oct) has everything ticked, including Sales → Order → Retrieve orders info, which covers listing and reading orders. Not yet tried against the store.
+- **Test given:** `test_magento_orders.py`, read-only. It calls `sales_order.list` for 1–23 Oct (UTC bounds 2026-09-30 21:00 to 2026-10-23 20:59), falling back to an order-number filter. It prints number, created time, status and total, checks the 18 Complete orders against the screenshot, and lists the field names only. Tested against a stand-in store: normal run, refused date filter, wrong key.
+- **Security note for Stefan:** with everything ticked, the API key can also delete products and customers, create and cancel orders, and void invoices. Houston needs reads plus catalogue, stock and image updates.
+- **Not built yet:** the orders pull and the channel logic in Houston's code. Both wait on the test's result.
+
+### 2026-10-23 20:40 — Orders API confirmed; channel logic and orders pull built (houston-channels.zip)
+- **Orders API test passed (Stefan, 23 Oct):** `sales_order.list` with a created_at filter returned 20 orders for 1–23 Oct. 18 of 18 Complete orders match the screenshot's number, total and status.
+  - The other two: #100015882 (canceled, 298.54, replaced by #100015882-1) and #100015895 (holded, 359.13, placed 19 Oct 09:01 Romanian time). No WinMENTOR invoice for #100015895 as of the 23 Oct 17:10 copy.
+- **Times:** Magento returns UTC; Romania is UTC+3 until 25 Oct. For example, #100015881 at 21:20:47 UTC is 3 Oct 00:20:47, as on the screenshot.
+- **Fields:** about 160 per order, including names, email, phone, address fields, remote_ip, customer_is_guest, coupon_code and shipping_method. Houston keeps four.
+- **Rules on history** (rules 1–7 only, share of value left Unknown):
+  - 2017 onward: at most 1.4% a year.
+  - 2011–2016: 8–22%, because website invoices carry no SITE note before 2016.
+- **Built:** houston-channels.zip, not yet installed.
+  - `store_orders.py`: writes `mg_orders` (order number, created_at UTC, placed_on Romanian day, status, grand_total) and logs each update in `mg_pulls`. The first update reads from April 2011; later ones re-read the last 60 days.
+  - `channels.py`: writes `sales_docs`, one row per GetVanzariLuna document of the month's owner database, with channel, rule, reason and the matched website order. Fiscal code and name are kept for companies only. `summary(first, last)` returns the channels in a fixed order with a Total line. Adds the Data health check \"Sale with no channel\" for this month and the two before.
+  - `views_channels.py`: a \"Website orders\" box in the sidebar while connected, with an Update button that re-runs the checks.
+  - `apply_channels_patch.py`: health.py rebuilds the channels on every pre-flight run; views.py gets the sidebar box; views_health.py heads that check's table Document / Date and total; views_product_list.py leaves the check out of the product filter. It writes nothing unless every place is found.
+- **Tested:**
+  - October from Houston's data (361 documents, one line each, addresses anonymised) plus the 20 orders gives exactly the table in the previous entry: Website 21 / 1,655.46, B2B 93 / 44,703.13, BEBETEI 125 / 107,294.93, eMAG Marketplace 88 / 3,335.33, eMAG wholesale 5 / 28,796.52, People offline 0, Unknown 3 / 132.53 (69719, 69816, 69929), Total 335 / 185,917.90.
+  - Stand-in store: no names, emails or phones stored; Romanian days correct; second update re-reads 60 days.
+  - Patch: CRLF kept, safe to run twice, no file changed when one place is missing.
+  - A failing channel run is undone and shown as a Data health line.
+  - Rebuild takes 4.4 s on a same-size copy (657k lines, 88k documents).
+- **Next:** Stefan installs and runs Update website orders. Claude then checks `sales_docs` for October against this table through the connection.
+
+### 2026-10-23 21:06 — Channels installed and checked; Sales section gets a Total subsection
+- **Installed and run by Stefan, 23 Oct.**
+  - `mg_orders` holds 12,627 orders placed 4 Apr 2011 to 19 Oct 2026, in one pull at 20:49 with no error. Statuses: complete 10,155, canceled 1,586, pending 726, processing 61, holded 49, plata_card_neprocesata 27, closed 22, mobilpay_payment_complete 1.
+  - `sales_docs`: 69,716 documents, built 20:59. WinMENTOR October copy still the 23 Oct 17:10 run.
+- **October in Houston (lei without VAT):**
+  - Website 21, 1,655.46; B2B 93, 44,703.13; BEBETEI 125, 107,294.93; eMAG wholesale 5, 28,796.52.
+  - eMAG Marketplace 89, 3,312.76; Unknown 2, 155.10 (69719, 69929).
+  - Total 335, 185,917.90, the same as the test.
+  - One difference from the test: return 69816 (8 Oct, \"RETUR COLET DETERIORAT\", −27.31) now matches F.BIO65735 of 3 Feb 2026 (CARD EMAG): same address, same product (592793, Ekos Baby dish detergent, 1 × 22.57), same total. The test only held Sep–Oct, so it stayed Unknown there. Eight months apart, so it may be the same customer's earlier order rather than the one returned; the channel is plausible either way.
+- **Data health** should now list 2 sales with no channel: 69719 and 69929.
+- **Stefan, 23 Oct:** the Sales section gets a Total subsection showing all of the company's sales, besides the channel table's Total line.
+
+### 2026-10-23 21:17 — Sales section built (houston-sales.zip): Total plus one page per channel
+- **Agreed by Stefan, 23 Oct:** the Sales section layout. More features for the pages are to be discussed later.
+- **Built:** houston-sales.zip, not yet installed.
+  - `sales.py`: data, read-only.
+  - `views_sales.py`: the pages.
+  - `apply_sales_patch.py`: changes app.py only. It adds the Sales section right after Overview and Work log, and moves the section-header colour lines down one (nth-of-type 2–6 → 3–7), so existing sections keep their colours. Sales gets the default grey.
+- **Pages:** Total, Website, eMAG, BEBETEI, B2B, People offline.
+  - Each page has: From/To months (default January of the newest year to the newest month) against the same months a year earlier; metrics for lei without VAT, product units and documents, each with the change; a monthly bar chart against a year earlier; tabs By brand, By supplier and By product. A click on a product opens its window.
+  - Total starts with the channel table, including Unknown and the Total line. eMAG shows Marketplace, wholesale and eMAG total, plus a Show switch: Both / Marketplace / wholesale.
+- **Rules in the code:**
+  - A sale is a GetVanzariLuna line whose sales_docs document isn't \"Not a sale\".
+  - Lei = quantity × price, without VAT.
+  - Services (catalogue c14 = Da, e.g. 704, 667, REDUCERE9/19) and code-less lines count in the lei totals but not in product, brand or supplier figures.
+  - When the period ends in the newest month, the same month a year earlier is counted to the same day.
+  - Brand = website c2c_length through health_products. Supplier = last reception across all databases.
+- **Tested** in Streamlit 1.66.1's test runner on a synthetic 22-month database: all six pages run; totals, products-only sums, units, the day cut and the eMAG switch match direct SQL.
+- **Real data, for checking after install** (Total page default, Jan–Oct 2026 against Jan–Oct 2025, Oct 2025 to day 23, lei without VAT):
+  - Total 2,945,030 against 2,918,286.
+  - BEBETEI 1,976,995 against 1,837,523; B2B 682,374 against 809,138; eMAG wholesale 158,120 against 104,403.
+  - Website 63,150 against 105,927; eMAG Marketplace 58,175 against 44,855.
+  - Unknown 3,017 against 11,471; People offline 3,200 against 4,968.
+
+### 2026-10-23 21:28 — Sales pages: supplier table removed, comma numbers; ideas for the pages proposed
+- **Stefan, 23 Oct:** drop the By supplier table; numbers in tables get comma thousand separators.
+- **Done:** a new `views_sales.py` (replaces the installed one, fingerprint afc81a5902).
+  - Tabs are now By brand and By product. The product table no longer has the Last delivered by column.
+  - Lei and units are formatted `%,.0f` and change `%+,.0f%%`. The comma flag was checked in Streamlit 1.66.1's bundled sprintf.
+  - All six pages run in the test runner.
+- **Website, measured for the discussion** (Magento orders, status complete or closed, Jan–Sep):
+  - Orders: 2024 848, 2025 839, 2026 452 (−46%).
+  - Basket with VAT: 137.7, 140.5 and 168.4 lei (+20% in 2026).
+  - Q1 orders: 305 in 2025, 191 in 2026 (−37%).
+  - Organic clicks per day: Q1 2026 46.7, Jun–Sep 2025 42.8, Apr–22 Jun 2026 27.1. So clicks only fell from April.
+  - Houston has no traffic data before June 2025, so the cause of Q1's fall can't be told yet.
+  - GA4 sessions are bot-inflated from January 2026 (186,668 in Jan) and need a Romania-only pull before any conversion rate.
+- **Concentration:** BEBETEI is 67% of Jan–Oct 2026 sales (1,976,995 of 2,945,030 lei).
+- **Proposed to Stefan for the Sales pages, not decided:**
+  - chart notes (Google updates, our changes, data incidents);
+  - a price-volume-mix bridge against a year earlier;
+  - winners and losers;
+  - margin from WinMENTOR cost (needs FIFO or average from the operator);
+  - channel mix and concentration;
+  - a year-end forecast tested on past years;
+  - the website chain from clicks to visits, orders, basket and sales (needs GA4 Romania-only and history from Jan 2025);
+  - sales by traffic source and landing page;
+  - branded vs non-branded search, and the effect of our changes against untouched products;
+  - an order-time heatmap;
+  - Ads cost and return (needs the Ads connection);
+  - per customer and shop, with gone-quiet flags;
+  - later: anomaly alerts, products bought together, lost sales while out of stock.
+
+### 2026-10-24 12:57 — Chart notes, why-it-changed bridge and Traffic sources page built (houston-marketing.zip)
+- **Stefan, 23–24 Oct:** build 1 (chart notes), 2 (why it changed) and 8 (sales by traffic source and landing page). Items 7–9 go on their own page rather than the Website sales page. 7 and 9 later.
+- **Placement (Claude's proposal):** a new Marketing section right after Sales, which will later also hold Social (Instagram, TikTok). Moving a page to another section is one line in app.py.
+- **Built:** houston-marketing.zip, not yet installed. It replaces sales.py and views_sales.py (this includes the earlier supplier and comma fix) and adds notes.py, marketing.py, views_marketing.py and apply_marketing_patch.py.
+  - The patch changes app.py only: it adds the Marketing section after Sales and moves the header colour lines again (4–8).
+- **Chart notes:** table `chart_notes` (day, kind, channel, note, source, ref).
+  - Seeded with Google ranking updates June 2025 – September 2026 from the Search Status Dashboard (status.search.google.com, read 23 Oct), our dated changes (19, 21, 25, 27, 29, 30 Sep), bot waves (24–27 Jan, 6–24 Jun, 27–29 Aug) and the Tag Manager bot filter (13 Oct).
+  - Houston pushes come from change_log automatically, one note per day.
+  - \"Get new Google updates\" reads status.search.google.com/incidents.json; Ranking incidents only, deduplicated by incident id.
+  - Notes show as orange markers on the monthly charts, with a list under each chart. The editor is on Total and Traffic sources.
+  - A note set to one channel shows on that channel's page and on Total.
+- **Why it changed:** a price-volume-mix bridge on every Sales page. Products are compared per channel and code; steps add up exactly.
+  - Real data, Total, Jan–Oct 2026 against Jan–Oct 2025 (Oct 2025 to day 23), lei without VAT: 2,918,286 → units +62,430, mix +30,857, prices +88,063, new products +208,130, products not sold now −335,346, fees and discounts −27,391 → 2,945,030.
+  - Units of products sold in both periods went from 200,781 to 205,616. Some of new/not-sold-now may be the same products under new codes; not checked.
+- **Traffic sources** (Marketing): visits = GA4 engaged sessions. Shows a source table, monthly orders by source with notes, and landing pages (product pages open their window). Store coverage comes from mg_orders. A year earlier is compared only when GA4 covers every month (data starts Jun 2025).
+- **Finding** (GA4 purchases by default channel, Jun–Sep 2025 against Jun–Sep 2026): 300 → 124 (−176).
+  - Cross-network (Performance Max): 189 → 56. Paid Search: 39 → 0. Organic Search: 49 → 30. Direct: 12 → 22.
+  - So paid ads account for 172 of the 176.
+  - Performance Max engaged sessions fell from about 1,400 a month (Aug 2025 – Jan 2026) to about 400–500 from April 2026; its purchases were 45–72 a month in Aug–Dec 2025 and 8–37 a month from February 2026.
+  - Cause unknown: asked Stefan whether the Ads budget or campaigns changed.
+- **Tested:** all Sales pages and Traffic sources run in Streamlit 1.66.1's test runner on synthetic data. Charts compile to valid Vega-Lite. The bridge closes to the ban. Google refresh, editor save (edit, add, delete) and channel filtering of notes all pass. The app.py patch was tested on a copy: once, twice, CRLF kept.
+
+### 2026-10-24 13:42 — Sales pages v3: cumulative line with dated notes, clearer bridge, clients; Traffic sources moves into Google Analytics
+- **Stefan, 24 Oct, on the installed Sales and Traffic sources pages:**
+  - The why-it-changed chart was unreadable.
+  - The main chart should be a line chart of cumulative sales with the chart notes; the monthly bars come after it.
+  - Notes are meaningless on a discrete month axis.
+  - \"Invoices and delivery notes\" should be a number of clients.
+  - Too many sections: Marketing = {TikTok, Instagram, Products, Google Search Console, Google Analytics {Traffic sources}}.
+- **Built:** houston-sales-v3.zip, not yet installed. It contains channels.py, sales.py, views_sales.py, marketing.py, views_marketing.py and apply_menu_patch.py.
+- **Main chart:** sales added up day by day for the selected months, against the same dates a year earlier (dashed grey). Chart notes are dashed orange lines on their exact dates, with a hover marker. The monthly bars follow, without notes.
+- **What changed:** now six horizontal bars, one per reason, each with a tooltip saying what it means, plus a sentence giving both totals and the difference. The bridge maths is unchanged.
+  - Real data, Jan–Oct 2026: products sold in both years +181,350 (units +62,430, mix +30,857, prices +88,063); new +208,130; not sold now −335,346; fees and discounts −27,391.
+- **Clients replaces the document count.** Each shop or branch of a company counts once; each delivery address of a person counts once; negative documents don't count.
+  - channels.py now stores `place` (GetVanzariExt c9) for companies only, so sales_docs gets a new column. rebuild() drops and recreates the table if the column is missing.
+  - A Sales page that finds the old table runs health.rebuild_quietly once.
+  - Person addresses become a 16-character SHA-1 code in memory for counting and are never stored.
+  - Jan–Oct 2026 places: BEBETEI 14 shops over 1,539 documents; Farmacia Tei 6; Carrefour 3; Mega Image 3; Sezamo 2; No Sugar Shop 2; DANTE 1.
+- **Menu (apply_menu_patch.py):**
+  - The separate Marketing section is removed and the Google section is renamed Marketing (Search Console, Analytics, Ads).
+  - Google Analytics opens with two tabs: Traffic sources, then Data and pulls (the old page; views.page_google_analytics gets title=True).
+  - Header colours move back to nth-of-type 3–7.
+  - Traffic sources now shows orders per week by source as lines, with notes.
+  - TikTok and Instagram come with step 7. \"Products\" in Marketing: asked Stefan what it should hold.
+- **Finding redone on full months** (GA4 data for June 2025 starts on the 10th, so Jul–Sep only):
+  - GA4 orders 243 → 89. Arrived through ads (Cross-network plus Paid Search) 182 → 35; Organic Search 41 → 24; everything else 20 → 30.
+  - Store orders (mg_orders, complete or closed) 275 → 113. GA4 saw 88%, then 79%.
+  - Worst case for the conclusion, with every order GA4 missed counted against it: ads −123, search −49.
+  - Ads bids on GA4-imported purchases (Stefan's choice, Oct 2026), so orders GA4 misses are orders the ads can't learn from. A possibility, not measured.
+- **Tested:** in Streamlit 1.66.1's test runner on synthetic data.
+  - All Sales pages and the Google Analytics tabs run. The cumulative lines end exactly at the period totals. The charts compile to valid Vega-Lite.
+  - The one-time rebuild from an old table works.
+  - The menu patch was tested on copies: once, twice, CRLF kept.
+
+### 2026-10-24 14:17 — Sales pages: running-total contradiction investigated (no error); order-time heatmap added (houston-sales-v4.zip)
+- **Stefan, 24 Oct:** this chat does the Sales pages only (the Marketing \"Products\" question is dropped here). The order-time heatmap was missing.
+- **Stefan's report:** the running-total line contradicts itself. With Sep–Oct, 2026 is above 2025 from about 1 to 12 Oct; with Oct–Oct, 2026 is below 2025 all October.
+- **Investigated: no data or chart error.** The line is a running total that starts at zero on the first day of the From month.
+  - Sep 2026: 323,411 lei; Sep 2025: 274,814. So 2026 starts October 48,597 ahead.
+  - Oct to day 23: 185,918 against 251,104 (−65,186).
+  - Running gap from 1 Sep: +17,523 on 12 Oct, −5,029 on 13 Oct, +7,794 on 19 Oct, −13,511 on 20 Oct, +12,577 on 21 Oct, −16,589 on 23 Oct. These match the screenshot's crossings.
+  - Most of the September lead is BEBETEI: 252,214 in Sep 2026 against 169,536 in Sep 2025.
+  - Part of it looks like timing: in 2026 BEBETEI got deliveries on 24 and 29 Sep (63,746 lei); in 2025 there was none after 23 Sep until 2 Oct (43,465).
+  - BEBETEI Sep+Oct (Oct to day 23): 328,010 → 359,509 (+9.6%).
+  - Day-by-day steps also don't line up because the same calendar date falls on a different weekday each year.
+- **Cross-check, GetVanzariExt against sales_docs** (GetVanzariLuna):
+  - Sep 2026 and Oct 2026 match to the leu.
+  - Sep 2025: Ext 274,019 against 274,814. The difference is AE 6528 and 6529 (19 Sep 2025, retailer order numbers 00548414 and 00549890, 705.60 + 200.10 lei), which are in GetVanzariLuna only and so are channel Unknown; and F 63583 (22 Sep 2025, RAMBURS SITE), 161.72 in Luna against 273.09 in Ext.
+  - Oct 2025: Ext 324,372 against 324,230.
+- **Built:** houston-sales-v4.zip (sales.py and views_sales.py), not yet installed.
+  - The running-total chart is titled \"Sales added up from <first day>\". Hovering anywhere shows both totals and the gap that day. The caption says the gap depends on where the period starts.
+  - New on the Website page, after the monthly chart: \"When people order on the website\", a weekday × hour heatmap of Magento orders (complete or closed) in Romanian time, from mg_orders.created_at through store_orders.to_local. Only website orders carry a time.
+  - Real data, Jan–Oct 2026, 470 orders: 8:00–15:59 holds 259 (55%), with a second peak at 19:00 (39). Monday is busiest (82), Saturday quietest (52).
+- **Tested:** in Streamlit 1.66.1's test runner. The Website, Total and BEBETEI pages run, and the charts compile to valid Vega-Lite with the hover selection attached.
+
+### 2026-10-24 14:42 — Bridge corrected to compare whole products (v5); teaching the chart, concept 1
+- **Stefan, 24 Oct:** Total Jan–Oct 2026 shows product units −1.0% while the bridge shows More units +62,430. Mix and prices are unclear; he asked to be taught the chart.
+- **Correction (Claude's error):** the bridge grouped products by channel and code. A product that moved between channels counted as gone in one and new in the other, so New products (+208,130) and Products not sold now (−335,346) were inflated and the labels didn't match.
+- **Fixed in houston-sales-v5.zip** (sales.py, views_sales.py; not yet installed): products are grouped by WinMENTOR code across the page's channels. Explanations and caption reworded; Prices now says it also moves when more of a product goes to customers who pay less.
+- **Real data, Total, Jan–Oct 2026 against Jan–Oct 2025 (Oct 2025 to day 23), lei without VAT, product-level:**
+  - 2,918,286 → units +127,394, mix +88,552, prices +69,811, new +69,829, not sold now −301,451, fees and discounts −27,391 → 2,945,030.
+  - Kept products: 400; units 203,745 → 213,628 (+4.9%); lei 2,626,319 → 2,912,076 (+10.9%); average price 12.89 → 13.63.
+  - New products: 37, with 5,248 units. Gone: 107, with 17,399 units last year.
+  - All product units 221,144 → 218,864 (−1.0%), which matches the metric.
+- **Biggest gone products:**
+  - 3019078, Isola Bio cashew and coconut drink: 43,605 lei and 3,000 units last year.
+  - Several Anthyllis 591xxx codes: 591787, 591830, 591718, 591713, 591015, 591009. New 592xxx codes appear with different EANs, e.g. dish and bottle detergent 591830 (EAN 8002849918302) → 592902 (EAN 8002849929025): new versions, not the same barcode.
+  - 0702706, Fior di Loto passata 700 g.
+- **Teaching:** started with concept 1, the three groups (kept, new, gone). Next turn: mix and prices.
+
+### 2026-10-24 15:12 — What changed: the tree replaces the bars (houston-sales-v6.zip)
+- **Stefan, 24 Oct:** chose the tree (mock 1 of three: tree, bridge with subtotals, grouped list) for \"What changed against a year earlier\".
+- **Built:** houston-sales-v6.zip (sales.py, views_sales.py), not yet installed.
+  - The bars are replaced by an SVG tree drawn with st.html: Change → Kept products (units, mix, prices), Range changes (new, no longer sold), Fees and discounts. Each box is the sum of the boxes to its right.
+  - Boxes are green when positive, orange when negative and grey at zero; the root is always grey. Product counts are shown on Kept, New and No longer sold.
+  - Hovering a box shows what it means (SVG title).
+  - Text uses currentColor, so it follows the light/dark theme. Width is capped at 760 px.
+  - sales.bridge now also returns the product count for each step.
+- **Tested:** in the test runner, Total, Website, eMAG and BEBETEI draw the tree (9 boxes) with no errors. The real Jan–Oct numbers were drawn to PNG on Houston's dark background to check the layout.
+
+### 2026-10-24 15:19 — Tree didn't render: st.html strips SVG; redrawn with Altair
+- **Stefan, 24 Oct:** the tree doesn't render.
+- **Cause (Claude's error):** Streamlit 1.66's st.html cleans its content with DOMPurify set to the HTML-only profile (`USE_PROFILES: {html: true}`, seen in the bundled Html component), which removes SVG. The earlier test only checked that the SVG was sent from Python, not that the page displayed it.
+- **Fixed:** a new `views_sales.py`, not yet installed.
+  - The tree is now an Altair chart: lines (rules), boxes (rects with cornerRadius 8, fill opacity 0.16), titles and values (text). Same layout and colours as the mock, 680×446, shown with `st.altair_chart(width="content")`.
+  - Text colour follows Houston's theme setting (`core.setting("theme")`): #FAFAFA on dark, #31333F on light.
+  - Hovering any box shows its name, lei and what it means.
+- **Tested this time on what is drawn, not only what is sent:**
+  - Rendered with Vega itself (vl-convert-python 1.9.0) in both dark and light with the real Jan–Oct numbers, and looked at the images.
+  - In the test runner, the Total page sends it as a vega_lite_chart, width 680, layers rule/rect/text/text.
+  - No real browser was available in the sandbox.
+
+### 2026-10-24 15:39 — Product window: units sold per month by channel
+- **Units sold per month, one line per channel** (houston-channel-lines.zip, 24 Oct). The product window's first chart (`views_orders.product_dialog`, so also the Orders window) keeps its All sales line. It gains thinner lines for Website, eMAG Marketplace, eMAG wholesale, BEBETEI and B2B. People offline and Unknown stay inside All sales, with no line of their own.
+- **New `channel_units.py`.** Table `sales_units` (database, month, WinMENTOR SKU, channel, units) is built in every pre-flight run, right after the channel rules, from the GetVanzariLuna lines of each document with a channel. These are the same rules as the Sales pages, with samples and donations left out. The chart then reads it by EAN through `wm_codes`, without scanning the sales lines.
+- **apply_channel_lines_patch.py** (run once) changes two files: `views_orders.py` (the chart block now calls `channel_units.chart(e, series)`) and `health.py` (imports the module and calls `channel_units.rebuild_quietly(c)` after `channels.rebuild_quietly`).
+- **Checked on Stefan's database,** Baule Volante apple vinegar (EAN 8018848017960): the channels add up exactly to All sales for every month from May to October 2026. For example, September 565 = eMAG wholesale 300 + BEBETEI 262 + People offline 3, and October 1,256 = eMAG wholesale 1,200 + BEBETEI 56. October's eMAG wholesale includes the 900 on invoice 69928.
+- **Found while reading the code:** `product_card.py` on Stefan's PC (141 lines, 22 Oct 23:22) is the version before houston-click-fix.zip, with later edits (`health.product`, `views.google_label`). So the faster window in three parts and the fresh table after each click aren't installed.
+
+### 2026-10-24 15:45 — Channel lines fixed; speed and highlight fixes merged into the current product window
+- **Why only All sales showed:** `sales_units` didn't exist on Stefan's database. The patch was applied (`health.py` line 306, `views_orders.py` line 160), but no pre-flight run has happened since; the last one was at 14:04:23 from the Sales pages, before the patch. `health_last_error` is empty.
+- **Fix** (houston-window-fix.zip): `channel_units.per_month` now counts the units itself when `sales_units` is missing, or older than the latest channel run. It stamps `sales_units_built` with `MAX(sales_docs.built_at)`. This costs a few seconds once after each WinMENTOR load, unless a pre-flight run has already done it. Tested: starting with no table, the first window built it and drew all five lines.
+- **The speed and highlight fixes are merged into Stefan's current `product_card.py`.** His edits are kept: `health.product` / `health.product_issues`, the `views.google_label` headings and the landing page link.
+  - The window comes in three parts, one shown at a time: Sales and stock, Google, Data checks (n).
+  - The Orders window's WinMENTOR lookups are kept in memory per product until the next WinMENTOR or catalogue load.
+  - The window shows "Opened in X s".
+  - `clickable_table` gives the table a fresh key after each click, so the clicked cell isn't left selected. It has a new optional `on_open`; existing callers (Product list, Sales, Marketing) are unchanged.
+  - Test with stand-in 2 s lookups: first open 2.6 s, reopen 0.0 s.
+- **Catalogue > Products** now opens the window from its own Open column (`views.py` lines 332–338, changed in another chat). `apply_click_patch.py` no longer fits that code and isn't needed.
+
+### 2026-10-24 16:00 — Units chart hover line; stock by warehouse and unit cost removed
+- **Units chart: hover line** (houston-chart-hover.zip, 24 Oct). Pointing at "Units sold per month" draws a vertical line at the nearest month. The points of every line light up, and one box lists the month with All sales, Website, eMAG Marketplace, eMAG wholesale, BEBETEI and B2B. The line is white in the dark theme and grey in the light one.
+  - It's the standard Altair multi-line tooltip: a `selection_point` (nearest, pointerover) on a rule layer, with the series turned into columns for the tooltip.
+  - Scroll-to-zoom and drag still work together with it. Tested in Streamlit 1.66: hover box showed Dec 2025 = All sales 888, eMAG wholesale 600, BEBETEI 235, Website 39, B2B 13.
+- **Product window tidied:** `apply_window_tidy_patch.py` (run once) removes "Stock by warehouse" and "Unit cost (WinMENTOR)" from `views_orders.product_dialog`, so they go from the Orders window too (same window). "Stock lines with dates" stays.
+
+### 2026-10-24 16:05 — Sales pages: gains and losses, bought together, empty forecast (houston-sales-v7.zip)
+- **Stefan, 24 Oct:**
+  - Add point 3 (winners and losers) and product bundles.
+  - Point 9 (search: branded vs non-branded, effect of our changes) goes to a new tab on the Google Search Console page, which is not this chat's work.
+  - Point 6 (forecast): add the section but keep it empty; he plans to run his own ML models.
+- **Built:** houston-sales-v7.zip (sales.py, views_sales.py), not yet installed.
+  - **Biggest gains and losses against a year earlier**, on every Sales page after the tree.
+    - A Products/Brands switch and two tables, Gains and Losses, top 10 each, with Lei and Change. Products also have a Note (new / no longer sold), and clicking one opens its window.
+    - `sales.movers()`.
+  - **Bought together**, on Website (website orders) and eMAG (Marketplace orders only).
+    - Pairs on the same order, for orders with 2–30 products, shown at 3 or more orders. The first product is the one bought less often; the share is of its orders.
+    - `sales.bundles()`, cached per period.
+  - **Forecast to the end of the year**, on Total after the monthly chart: an empty section with one line.
+- **Real data, website Jan–Oct 2026:**
+  - 463 orders with products, 205 with two or more, 2.4 products on average.
+  - Top pairs: Isola Bio rice and hazelnut drink 250 ml + millet drink 1 L on 7 orders (all 7 orders of the 250 ml); pumpkin + sunflower seeds (Fior di Loto) on 5; buckwheat crispbread (Baule Volante) + hulled buckwheat (Fior di Loto) on 5.
+- **Tested:** in the test runner, all pages run. On test data the bundle counts match a direct count (top pair 55 of 280 orders). The brands view works.
+- **Proposed next, not decided:** 12 (per customer and shop, with gone-quiet flags) for B2B and BEBETEI; 5 (channel mix over time and concentration) for Total; 4 (margin), which waits on the operator's answer on FIFO or average cost.
+
+### 2026-10-28 15:02 — Social profile links tagged, short redirects added
+- **Instagram and TikTok profile links** now point to `biomania.ro/instagram` and `biomania.ro/tiktok` (Stefan, today).
+- **Store:** two custom URL rewrites, Temporary (302), in Catalog → URL Rewrite Management:
+  - `instagram` → `https://www.biomania.ro/?utm_source=instagram&utm_medium=social&utm_campaign=bio_link`
+  - `tiktok` → the same link with `utm_source=tiktok`
+- **Tested:** the short Instagram link lands on the tagged address.
+- **Confounder:** from today, visits through the profile links are labelled source instagram or tiktok, medium social, campaign bio_link. Any comparison of social traffic across this date must say so.
+- **Seen in passing:** URL Rewrite Management holds 60,927 records, which is high for 516 products. Not investigated.
+- **Next:** check in GA4 Traffic acquisition (Session source / medium) that `instagram / social` and `tiktok / social` appear.
+
+### 2026-10-28 15:41 — Instagram connected: Meta app and token
+- **Meta app `Houston`** created by Stefan on developers.facebook.com (his Facebook account), use case "Manage messaging & content on Instagram", API setup with Instagram login. Standard Access; no App Review.
+- **Bio Mania's Instagram** added with the Instagram Tester role; the invitation was accepted on instagram.com → Apps and websites → Tester invites.
+- **Token generated today.** Permissions: basic plus "Access and manage insights" only. Comments, messages and publishing were left off.
+- **Stored** as `secrets/instagram_token.txt`, which is outside GitHub, backups and the MCP connection.
+- **Expiry:** long-lived Instagram tokens last 60 days unless refreshed (`graph.instagram.com/refresh_access_token`, `grant_type=ig_refresh_token`). The Instagram build must refresh it and show the days left.
+- **Next:** check the token with `instagram_check.py` (read-only).
+
+### 2026-10-28 15:52 — Instagram token checked; follower baseline
+- **`instagram_check.py` passed.** The token works for account biomania.ro, type BUSINESS.
+- **Instagram baseline, 28 Oct 2026:** 2,324 followers, 1,325 posts. This is the starting point for measuring the creator.
+- **Step 2 (connect Instagram) done.** Next: TikTok (step 3). The Instagram pull into Houston comes with the Social build (step 4).
+
+### 2026-10-28 15:56 — TikTok follower baseline
+- **TikTok baseline, 28 Oct 2026:** 8 followers, read from the profile by Stefan.
+- **What it means:** TikTok has no "before" period worth comparing with. The creator will be judged there on growth from 8 and on views per video.
+
+### 2026-10-28 16:15 — TikTok: developer route dropped, TikTok Studio instead
+- **Decision (Stefan):** TikTok's developer route is dropped. The portal asks for terms, privacy-policy links and app descriptions, which is overkill for one account with 8 followers.
+- **New route:** TikTok Studio analytics, downloaded from Studio and uploaded into Houston.
+- **First check:** in TikTok Studio → Analytics, whether there is a download/export button and how far back the date range goes. Third-party sources disagree on both; some say 60 days.
+- The TikTok developer app and sandbox `Houston` stay as they are. Nothing was stored in `secrets/` for TikTok.
+
+### 2026-10-28 16:32 — TikTok Studio download checked; applying for TikTok API for Business
+- **TikTok Studio Overview download read:** `Overview_2026_01_01-2026_10_26_.csv`, one row per day from 1 Jan to 26 Oct 2026.
+- **Columns:** video views, reached audience, profile views, likes, shares, comments, website clicks, new and lost followers (plus product-link, phone, lead and app columns, all 0).
+- **Totals, 1 Jan – 26 Oct 2026:** 1,741 video views on 43 days, 13 profile views, 4 likes, 7 website clicks, 7 new followers and 0 lost. "Reached audience" is mostly empty (NAN).
+- **The custom range reaches back to 1 Jan**, so history isn't limited to 60 days for this download.
+- **Decision (Stefan):** apply for TikTok API for Business, Accounts API part (TikTok Accounts permission), for organic account and post data. The Studio download stays as the fallback while the application is reviewed.
+
+### 2026-10-28 20:12 — Ordering (step 4): who we order from — the producer map decides
+- **Measured 28 Oct** (health_products built 14:38; receptions in BIO2025, i.e. since Jan 2025): all 513 website products have a Magento producer; 13 producers, whose orders go to 7 firms, plus Wood Way (unknown).
+  - BV&FdL 162 and La Finestra sul Cielo 120 → Healtion; Pierpaoli 87 → Pierpaoli; ABAFOODS 42 → Abafoods; A.S.T.R.A 32 → A.S.T.R.A; CLECA 30 → CLECA; Frenchtop 18 → Sysmed; Taste of Nature 7, FZ Organic food 1, Fior di Lotto 1, Gino Girolomoni 1 → Healtion; Ecotoys 10 → Ecotoys SRL? (delivered only before 2025); Wood Way 2 → ?
+- **Healtion is Probios renamed.** Probios's last delivery 17 Feb 2026 (invoice 15019 of 13 Feb), Healtion's first 30 Mar 2026 (invoice 28721 of 24 Mar); the 2026 invoice numbers run as one series up to 102972 (21 Oct). Public sources: Probios bought BiotoBio (2024); Probios Group renamed itself Healtion (brands Probios, Baule Volante, La Finestra sul Cielo, ViviBio, Fior di Loto, Zer%); Cosmofarma 2026 lists HEALTION SRL SOCIETA' BENEFIT (PROBIOS SRL), Calenzano. Answers build-plan open question 1. Would be wrong if a Probios and a Healtion invoice carry different VAT numbers.
+- **Cost of \"supplier = last delivery\":** 30 products sit under Probios and 2 under BiotoBio (11 of the 30 sold in Aug–Oct, 181 units); 83 have no delivery since Jan 2025 (6 sold in Aug–Oct). Data health \"Website producer isn't who delivers\" = 272; with the map, and Probios and BiotoBio read as Healtion, 10: 9 Isola Bio products last delivered by Healtion, and Iris passata with basil 690 g (A76PP00269OIR), Magento producer La Finestra, delivered by A.S.T.R.A (probably a wrong producer in Magento).
+- **Isola Bio is split:** since Jan 2025, 10 products came from both Abafoods and Probios/Healtion, 4 only from Probios/Healtion. Stefan confirms a few products are ordered from two firms.
+- **Decision (Stefan, 28 Oct):** the map decides. Each website product has one \"Order from\" firm: its Magento producer's firm, unless set by hand for that product. The last delivery stays as a Data health check. Probios and BiotoBio count as Healtion. Replaces the build plan's rule \"Supplier = whoever delivered last\" for ordering.
+- **Open:** the firm for Ecotoys and Wood Way; which Isola Bio products go to Healtion (Stefan's mother).
+
+### 2026-10-30 13:19 — Bot filter check: GA4 screen sizes, 14–30 Oct
+- **Source:** GA4 Tech details, Rezoluția ecranului × Țară, 14–30 Oct 2026 (Stefan's screenshot, 30 Oct). 8,588 active users, 2,303 engaged sessions, 201 rows.
+- **Old bot screens gone:** 1280x1200, 1600x1600 and 800x600 are not in the top 10 (smallest top-10 row: 36 users). In 1 Jan–13 Oct they were 94.5% of users. Cloudflare's country challenge started the same day (DNS switch 13 Oct 14:39), so the drop can't be credited to the Tag Manager filter alone.
+- **New top row: 2560x1600, Romania.** 6,513 users (75.84%), all new, 1,898 engaged sessions, 10 sec average engagement. For contrast, 1920x1080 Romania: 36 users, 1 min 20 sec. At this rate it would have passed 100,000 users in 1 Jan–13 Oct, where all other screens came to 28,581, so it is new. Probably not customers; not confirmed, since its key events weren't on the screenshot. If it isn't customers, GA4 filtered to Country = Romania is no longer clean.
+- **375x812 with 0 engaged sessions:** India 441, United States 433, New Zealand 82, Germany 66, Singapore 46 (Romania 72, 2 engaged). Also United States 1920x1080 194 (6 engaged) and 1536x960 43 (0). 375x812 is a real iPhone size (X, XS, 11 Pro, 12/13 mini), so a screen-size block would also hit customers.
+- **Open:** the purchases half of the check (Evenimente cheie column); how the non-Romanian hits get past Cloudflare's challenge (Blugento's whitelist rule, the ~2% that pass, or hits sent straight to GA4).
+
+### 2026-10-30 13:38 — Cloudflare events, India, 29–30 Oct: whitelist ruled out
+- **Source:** Cloudflare Security → Analytics → Events, filter Country = India, export 29 Oct 13:07 – 30 Oct 11:19 UTC (Stefan, 30 Oct). 482 events from 161 IPs.
+- **Actions:** 468 JS challenges (rule geo-block), 14 skips (rule whitelist). All 14 skips are /media product images and the logo, which the whitelist lets through for everyone. None came from Google, Microsoft or Meta networks, StatusCake or GTmetrix. So the whitelist isn't how Indian hits reach GA4.
+- **Pages:** all 213 Indian page requests were challenged. The file has no solved-challenge events.
+- **Devices:** every request claims desktop Chrome (Windows, Mac or Linux), none a phone, while GA4's India row is 375x812.
+- **Networks:** HostRoyale (data centre) 122 events; home and mobile providers for most of the rest (Reliance Jio 108, Bharti Airtel 78 over two networks).
+- **Unexplained:** several Indian IPs requested page icons and product images with biomania.ro as referrer but no page from that IP (e.g. 103.240.166.144, 85.208.42.213), so the page came over another connection. Fits bots that switch IP between requests; not confirmed.
+- **Next:** compare with GA4's Indian users for the same hours. Parked until the 2560x1600 Romania check is done.
+- **Note:** a first attempt to add this entry, around 13:30, timed out in the Claude Desktop app and wrote nothing (checked in the file). Retried after that check.
+
+### 2026-10-30 22:05 — Step 5, Product Analysis: strategy agreed, brief written
+- Strategy for step 5 discussed and agreed. Full brief, edited by Stefan: https://claude.ai/artifact/5dXVMUaFdStxgL9ToF7ZjT (main tab: decisions, features, build order Phases A-D, data notes, open questions, rejected ideas; second tab: setup guides). Build from the brief, not from this entry.
+- Name and place: its own Houston section, "Product Analysis": an Overview page across all products (incl. rising searches), then each product's own page. Product window = quick look + "Open product page"; Catalogue > Products = full editor.
+- Judges each product on the website's path from search to sale (searched, shown, clicked, viewed, added to cart, bought, with stock). BEBETEI, eMAG and B2B only as context. Comparisons are always outside (resellers selling the same product, competitors' similar products), never against our own products.
+- Edits on the page: name, meta title, meta description only, in place, through Review and push with a prediction line. Everything else opens in Catalogue > Products.
+- Bought together reuses sales.bundles() from Sales > Website, with a product filter added inside that function.
+- Sources agreed: DataForSEO on its free credit only + Stefan's console script for Google page 1; Merchant API (Competitors, Price competitiveness); URL Inspection weekly; Search Console result-type split; Generative AI report as an experimental hand export; Trends weekly shape x Keyword Planner monthly counts (hand exports until the Google Ads API has Basic access).
+- Did changes work: each product's weekly average over the 8 weeks before vs the 8 weeks after Google's first re-crawl after the change, never the change date. Wins: about +1,000 impressions for big products, doubled for the rest; a few points CTR only with enough impressions; 2-3 places better on the main search. No control group (considered, dropped).
+- Data found on 30 Oct: ga4_items now complete (10 Jun 2025 - 23 Oct 2026); Search Console still misses 23 Jun - 8 Sep 2026; Houston built page addresses from URL keys, and two pairs share one (Anthyllis nappy creams, Onozaky miso: the second of each lives at a -2285 / -2209 address); Stefan changed the kuzu starch's key on 30 Oct; change_log holds 39 pushes, 7-9 Oct only, so September's hand edits in the Magento admin go in through the planned "Add change by hand" form.
+- Naming: the 7 Oct push removed "vegetala" from all 33 plant-drink names; the 7 Oct names are the current rule.
+- Setup on 30 Oct: DataForSEO credentials in secrets/ (done); Merchant API enabled in the houston Cloud project (done; admin/website checks, new sign-in and registration remain); Google Ads API not started (takes longer).
+- Next: Phase A of the brief in a fresh chat.
+
+### 2026-10-31 19:27 — Step 5, Phase A: changes made by hand and the prediction line built (houston-phase-a.zip); page addresses moved to Data health
+- **Built, not yet installed:** houston-phase-a.zip = hand_changes.py, views_changes.py, apply_changes_patch.py, test_gsc_gap.py.
+- **Change log:** two tabs. Pushed from Houston (as before, plus each push's prediction) and Made by hand: the "Add change by hand" form (date; one product, a pasted SKU list, a category or the whole site; one or more types: Name / meta, Description, Images, Page design, Price / promo, Other; what changed; prediction) and the list of entries, with delete.
+  - New tables hand_changes and hand_change_products. A category entry keeps the products in the category on the day it is saved; a whole-site entry has none and applies to every product.
+  - Pasted SKUs match exactly, then with spaces ignored, then with leading zeros or upper/lower case ignored (the Change log's 7-digit padding). Checked 31 Oct: no two live SKUs are the same once leading zeros are dropped. A SKU that isn't found blocks the save.
+  - 9 drafts, each saved once by Stefan: 27 Sep plant drinks (33 SKUs = the 7 Oct push), 29 Sep flakes (SKUs to paste), 30 Sep "100%" flakes, pastas (SKUs to paste), gnocchi, vinegars, creams, and the Happymais meta descriptions of 2 and 5 Oct. Predictions are the ones written in the 27 and 30 Sep session logs.
+  - hand_changes.for_product(sku) returns one product's pushes and hand changes together, for Phase C.
+- **Review and push:** a Prediction column (kept as soon as it's typed) and one line that fills every ticked change without one. The prediction goes into change_log's entry JSON; no schema change. A change queued again keeps its prediction (core.queue). The table gets a fresh key whenever the waiting changes differ, so a tick or a prediction can't land on another row after a discard or a push.
+- **mcp_server.py:** describes the two new tables (inside try/except, so it can't stop the server).
+- **Tested** in Streamlit 1.66.1's test runner: all four kinds of product choice, drafts, a wrong SKU, validation, delete, typed and one-line predictions reaching the change log. Patch tested on CRLF copies: all-or-nothing, .bak kept, safe to run twice.
+- **Item 1, page addresses (measured 31 Oct):** Magento's served address is in each product's url_path in the catalogue copy; it differs from url_key + ".html" on 20 of 513 live products (e.g. 592900 is served at …-1000ml-2278.html; Houston shows the plain address's 2,062 impressions from 2025 instead of its own 91). **Decision (Stefan):** a Data health attribute checker over all active products (missing attributes, duplicate URL keys etc.), built in the Data health chat, and manual fixes. Advice given: if a URL key is edited, set it to the served address without ".html" so the live page doesn't move. The kuzu key change of 30 Oct goes with this item.
+- **Item 2, Search Console gap:** the re-pull already ran on 24 Oct 15:28 and got 0 rows. google_sc._fetch asks for dataState "final"; Google's API also offers "all", which includes data that isn't final yet. test_gsc_gap.py (read-only) asks both ways for the gap and two weeks on each side. Waiting for its output.
+- **Correction:** the Search Console data Houston holds is from property https://www.biomania.ro/, not sc-domain:biomania.ro.
+- **FAQ check:** the FAQ is on all 5 cooking creams and both gnocchi in the catalogue copy of 22 Oct (the date it was added isn't recorded).
+- **For Phase C:** chart_notes already holds "Our change" notes for 27, 29 and 30 Sep, so product charts must not mark those days twice once the hand entries exist.
+
+### 2026-10-31 19:37 — Search Console gap: Google has nothing for 23 Jun – 8 Sep, item 2 closed; Phase A install checked
+- **test_gsc_gap.py, run by Stefan on 31 Oct:** for property https://www.biomania.ro/, Google sends nothing for 23 Jun – 8 Sep 2026, neither finalised nor with unfinished data allowed. The two weeks either side match Houston exactly: 9–22 Jun 14 days, 358 clicks, 35,144 impressions; 9–22 Sep 14 days, 322 clicks, 28,245 impressions.
+- **Item 2 closed, nothing to build.** The gap is treated as lost unless Search Console's graph shows those dates later. No comparison may span it (rule unchanged).
+- **Other properties the sign-in sees:** sc-domain:biomania.ro as siteUnverifiedUser, so the API refuses it (403) and Houston can't read it; a URL-prefix property for one product page (…isola-bio-1l.html/), with no data.
+- **Install checked:** apply_changes_patch.py ran 31 Oct 19:29 (core.py 972 lines, views.py 1028, mcp_server.py 715). Tables hand_changes and hand_change_products exist; no entries yet.
+- **For Phase C:** the 8 weeks before the September edits fall almost entirely in the gap. Before 27 Sep only 9–26 Sep (18 days) exists, so those edits can't get the 8-week baseline; the same weeks of 2025 are complete.
+
+### 2026-10-31 20:11 — Step 5, Phase B built: Product Analysis section (houston-phase-b.zip)
+- **Built, not yet installed:** houston-phase-b.zip = analysis.py (data, read-only), views_analysis.py (pages), apply_analysis_patch.py (app.py, product_card.py, views.py; all-or-nothing, .bak kept, safe twice).
+- **Menu:** new section Product Analysis (Overview, Product page) between Marketing and Catalogue.
+- **Overview:** one row per live product for the window (Last 28 days, or Since 9 Sep 2026; never before 9 Sep because of the gap): Search Console impressions, clicks, CTR, position, top search; website units from WinMENTOR (sales_units, channel Website, newest 3 months); stock and in stock online from health_products (packs counted in singles). A click opens the product window. Below: searches that rose against the same dates a year earlier (at least 50 impressions, "biomania" left out) and question searches (rule shown on the page, at least 10 impressions), each with the page Google showed most.
+- **Product window:** an "Open product page" button (st.switch_page with ?sku=).
+- **Product page:** product picker; the address bar follows the choice (?sku=), so a product page can be bookmarked. Header with SKU, EAN and the live address (url_path). Name and meta, with an Edit box (popover) that uses the same widgets, diff and checks as Catalogue > Products plus the prediction line, into Review and push; "Edit in Catalogue" opens Catalogue > Products filtered to the SKU, with it open. The window's parts are reused: Sales and stock, Google, Data checks (product_card._google and _checks take title=False).
+- **Not in Phase B:** views and add to cart. ga4_items is pulled for all countries, with no Romania filter; a Romania-only pull belongs to Phase C's chain.
+- **Year-earlier caveat:** when the year-earlier dates touch 10–14 Sep 2025, the page says impressions were inflated then (Google stopped serving 100 results per page, by third-party reports, not Google's).
+- **Tested** in Streamlit 1.66.1's test runner on stand-in data: both pages, the window's button (the dialog's own rerun emulated), the edit box with prediction and checks, Edit in Catalogue, picker and link.
+- **Decision (Stefan, 31 Oct):** the 9 drafts of hand edits are not entered. Phase C's "did our changes work" has no record of the September edits unless they are entered later.
+- **Found, left as it is:** app.py's section-colour CSS (nth-of-type 3–7) can't match in Streamlit 1.66.1, because each section header sits alone in its own div; every header keeps the default grey border.

@@ -10,6 +10,7 @@ pulls ended, so a pull that stopped halfway is finished by the next Update.
 Visits that start on Magento's action links (add to compare / wishlist / stock alert / send to a friend)
 are stored as one line per day and channel, landing_page = '(Magento action links)'. Each such link is
 unique, so storing them one by one only filled the table; the totals stay the same.
+ga4_landing is stored compactly (see core.write_compact); the view of that name reads like a normal table.
 """
 import datetime
 import time
@@ -207,9 +208,15 @@ def pull(prop, start=None, end=None, progress=lambda f, t: None, data=None):
                 errors[table] = "Google's answer had an unexpected shape; nothing stored for this month."
                 continue
             with closing(core.connect()) as c, c:
-                c.execute(f"DELETE FROM {table} WHERE property = ? AND date BETWEEN ? AND ?",
-                          (prop, m_start.isoformat(), m_end.isoformat()))
-                c.executemany(f"INSERT OR REPLACE INTO {table} VALUES ({', '.join('?' * width)})", records)
+                if table == "ga4_landing":  # compact storage: see core.write_compact
+                    names = ["property", "date", "landing_page", "channel", "sessions", "active_users",
+                             "engaged_sessions", "key_events", "purchases", "revenue", "pulled_at"]
+                    core.write_compact(c, table, prop, m_start.isoformat(), m_end.isoformat(),
+                                       [dict(zip(names, r)) for r in records])
+                else:
+                    c.execute(f"DELETE FROM {table} WHERE property = ? AND date BETWEEN ? AND ?",
+                              (prop, m_start.isoformat(), m_end.isoformat()))
+                    c.executemany(f"INSERT OR REPLACE INTO {table} VALUES ({', '.join('?' * width)})", records)
                 c.execute("INSERT INTO ga4_pulls VALUES (?, ?, ?, ?, ?, ?)",
                           (pulled_at, prop, table, m_start.isoformat(), m_end.isoformat(), len(records)))
             counts[table] += len(records)

@@ -1,0 +1,204 @@
+"""The product window. One click on a product in a table opens it (product_card.show(sku)).
+
+Three parts, one shown at a time so the window opens fast:
+- Sales and stock: the Orders page window (stock figures, units sold per month by channel, year against year,
+  stock by warehouse, cost, dated stock lines). Its WinMENTOR figures are kept in memory per product until the
+  next WinMENTOR or catalogue load, so opening a product again is instant.
+- Google: Search Console and Analytics for the product's page.
+- Data checks: its pre-flight problems, and its website and WinMENTOR data.
+Read-only: edits go through the tables and Review and push.
+
+To make a table open it on a click, use clickable_table() instead of st.dataframe.
+"""
+import time
+from contextlib import closing, contextmanager
+
+import pandas as pd
+import streamlit as st
+
+import core
+import health
+import views
+import views_orders
+import winmentor as wm
+
+PARTS = ["Sales and stock", "Google", "Data checks"]
+
+
+# --- the click -----------------------------------------------------------------------------
+def clickable_table(df, skus, key, on_open=None, **kwargs):
+    """A read-only table where clicking any cell of a row opens that row's product. skus: one per row, in order.
+    on_open(sku), if given, runs too (e.g. to point another part of the page at the product)."""
+    n = st.session_state.get(key + "_n", 0)
+    k = f"{key}_{n}"
+
+    def picked():
+        sel = (st.session_state.get(k) or {}).get("selection", {})
+        cells, rows = sel.get("cells") or [], sel.get("rows") or []
+        i = cells[0][0] if cells else (rows[0] if rows else None)
+        if i is not None and 0 <= i < len(skus):
+            st.session_state[key + "_open"] = skus[i]
+            st.session_state[key + "_n"] = n + 1          # a fresh table next run: the clicked cell isn't left selected
+            if on_open:
+                on_open(skus[i])
+    try:
+        st.dataframe(df, on_select=picked, selection_mode="single-cell", key=k, **kwargs)
+    except Exception:                                    # noqa: BLE001  (a Streamlit without cell clicks: whole rows)
+        st.dataframe(df, on_select=picked, selection_mode="single-row", key=k + "_r", **kwargs)
+    sku = st.session_state.pop(key + "_open", None)
+    if sku:
+        show(sku)
+
+
+# --- WinMENTOR figures kept in memory until new data arrives ------------------------------------
+_WM = {n: getattr(wm, n) for n in ("product_details", "monthly_series", "ytd", "magento_names") if hasattr(wm, n)}
+
+
+def _data_version():
+    with closing(core.connect()) as c:
+        a = c.execute("SELECT MAX(loaded_at) FROM wm_files WHERE status = 'loaded'").fetchone()
+        b = c.execute("SELECT value FROM meta WHERE key = 'loaded_at'").fetchone()
+    return f"{(a or [''])[0]}|{(b or [''])[0]}"
+
+
+@st.cache_data(show_spinner=False, max_entries=400)
+def _remembered(name, version, *args):
+    return _WM[name](*args)
+
+
+@contextmanager
+def _remembering():
+    """While the Orders window body runs, its WinMENTOR lookups come from memory when the data hasn't changed."""
+    v = _data_version()
+    for name in _WM:
+        setattr(wm, name, (lambda nm: lambda *a: _remembered(nm, v, *a))(name))
+    try:
+        yield
+    finally:
+        for name, f in _WM.items():
+            setattr(wm, name, f)
+
+
+# --- the parts -----------------------------------------------------------------------------
+def _facts(pairs):
+    st.markdown("\n".join(f"- {label}: **{value}**" for label, value in pairs if value not in (None, "")))
+
+
+def _title(r, rec, sku):
+    ean = r.get("ean") or ""
+    st.subheader(r.get("name") or rec.get("name") or sku)
+    st.caption(f"SKU {sku}" + (f" · EAN {ean}" if ean else " · no valid EAN"))
+
+
+def _analytics(url_key):
+    """Visits that started on the product's page (GA4 landing page), by month and channel."""
+    import altair as alt
+    path = f"/{(url_key or '').strip()}"
+    with closing(core.connect()) as c:
+        df = pd.read_sql_query(
+            "SELECT l.date, ch.value AS channel, l.sessions, l.purchases, l.revenue FROM ga4_landing_c l "
+            "JOIN dict d ON d.id = l.page AND d.kind = 'ga4_page' LEFT JOIN dict ch ON ch.id = l.channel "
+            "WHERE d.value IN (?, ?)", c, params=[path + ".html", path])
+    if df.empty:
+        st.markdown(f"No {views.google_label('analytics')} visits started on this product's page.",
+                    unsafe_allow_html=True)
+        return
+    df["date"] = pd.to_datetime(df["date"])
+    last = df["date"].max()
+    recent = df[df["date"] > last - pd.Timedelta(days=90)]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Visits, last 90 days", f"{recent['sessions'].sum():,.0f}")
+    m2.metric("Purchases from them", f"{recent['purchases'].sum():,.0f}")
+    m3.metric("Revenue from them", f"{recent['revenue'].sum():,.0f} lei")
+    top = df.groupby("channel")["sessions"].sum().nlargest(4).index
+    df["channel"] = df["channel"].where(df["channel"].isin(top), "Other")
+    month = df.assign(month=df["date"].dt.to_period("M").dt.to_timestamp()).groupby(
+        ["month", "channel"], as_index=False)[["sessions", "purchases"]].sum()
+    st.markdown("**Visits that started on this page, per month**")
+    st.altair_chart(alt.Chart(month).mark_bar().encode(
+        x=alt.X("month:T", title=None), y=alt.Y("sessions:Q", title="Visits"),
+        color=alt.Color("channel:N", title="Channel"),
+        tooltip=[alt.Tooltip("month:T", title="Month", format="%b %Y"), "channel:N",
+                 alt.Tooltip("sessions:Q", title="Visits", format=",.0f"),
+                 alt.Tooltip("purchases:Q", title="Purchases", format=",.0f")]).properties(height=260))
+    st.markdown(f"Landing page: [{path}.html](https://www.biomania.ro{path}.html), "
+                f"data to {last:%d %b %Y}.")
+
+
+def _sales(r, rec, sku):
+    ean = r.get("ean") or ""
+    body = getattr(views_orders.product_dialog, "__wrapped__", None)
+    if ean and body:
+        with _remembering():
+            body(ean, wm.full_months_before(wm.today(), 3))
+    else:
+        _title(r, rec, sku)
+        st.caption("No valid EAN, so its WinMENTOR stock and sales can't be looked up.")
+
+
+def _google(r, rec, sku):
+    _title(r, rec, sku)
+    st.markdown(f"<h3>{views.google_label('search_console')}</h3>", unsafe_allow_html=True)
+    if rec.get("url_key"):
+        views.search_tab(sku, rec)
+    else:
+        st.markdown(f"Load the catalogue (Catalogue > Load) to see this product's page in "
+                    f"{views.google_label('search_console')}.", unsafe_allow_html=True)
+    st.markdown(f"<h3>{views.google_label('analytics')}</h3>", unsafe_allow_html=True)
+    if rec.get("url_key"):
+        _analytics(rec["url_key"])
+    else:
+        st.markdown(f"Load the catalogue (Catalogue > Load) to see this product's page in "
+                    f"{views.google_label('analytics')}.", unsafe_allow_html=True)
+
+
+def _checks(r, rec, sku, found):
+    _title(r, rec, sku)
+    titles = {k["id"]: k["title"] for k in health.CHECKS}
+    if found:
+        st.markdown("\n".join(f":red[●] **{titles.get(cid, cid)}**: {detail}  " for cid, detail in found))
+    else:
+        st.markdown(":green[●] No problems in the last pre-flight run.")
+    a, b = st.columns(2)
+    with a:
+        st.markdown("**Website**")
+        status = rec.get("status")
+        _facts([("Status", "Live" if status == "1" else "Disabled" if status else ""),
+                ("In stock online", "Yes" if r.get("online_in_stock") else "No" if r else ""),
+                ("Online price", f"{r['online_price']:,.2f} lei" if r.get("online_price") else ""),
+                ("Producer", r.get("producer")), ("EAN on the website", r.get("magento_ean"))])
+    with b:
+        st.markdown("**WinMENTOR**")
+        if r.get("wm_code"):
+            _facts([("SKU in WinMENTOR", r["wm_code"]), ("Name", r.get("wm_name")), ("EAN", r.get("wm_ean")),
+                    ("Last delivered by", (r.get("supplier") or "") +
+                     (f", {r['last_delivery']}" if r.get("last_delivery") else ""))])
+        else:
+            st.caption("Not found in WinMENTOR's live database.")
+
+
+def _pick_part(key, labels):
+    try:
+        got = st.segmented_control("Show", labels, default=labels[0], key=key, label_visibility="collapsed")
+    except AttributeError:                               # a Streamlit without segmented_control
+        got = st.radio("Show", labels, horizontal=True, key=key, label_visibility="collapsed")
+    return labels.index(got) if got in labels else 0
+
+
+@st.dialog("Product", width="large")
+def show(sku):
+    started = time.perf_counter()
+    sku = (sku or "").strip()
+    r = health.product(sku) or {}
+    rec = ((views.cache() or {}).get("products") or {}).get(r.get("raw_sku") or sku, {})
+    found = health.product_issues(sku)
+    labels = PARTS[:2] + [f"Data checks ({len(found)})" if found else PARTS[2]]
+    part = _pick_part(f"pc_part_{sku}", labels)
+    if part == 0:
+        _sales(r, rec, sku)
+    elif part == 1:
+        _google(r, rec, sku)
+    else:
+        _checks(r, rec, sku, found)
+    st.caption(f"Opened in {time.perf_counter() - started:.1f} s. Not in this window yet: a sales forecast (it comes "
+               "with ordering) and creator videos (they need the Instagram and TikTok connection).")

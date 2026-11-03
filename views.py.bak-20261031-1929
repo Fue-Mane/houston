@@ -1,0 +1,993 @@
+"""Houston pages. All writes go to the review queue first; only Review and push talks to the store."""
+import pandas as pd
+import datetime
+from pathlib import Path
+
+import streamlit as st
+
+import core
+import health
+from magento import ApiError, Magento
+
+URL = "https://www.biomania.ro/api/xmlrpc/"
+EMPTY = "—"
+SEARCH_COLS = {"Search impressions": "impressions", "Search clicks": "clicks", "CTR": "ctr",
+               "Avg. position": "position", "Top query": "top_query"}
+EDITABLE_TYPES = {"text", "textarea", "select", "boolean", "price", "weight", "date", "multiselect"}
+GROUPS = {
+    "General": ["name", "status", "visibility", "manufacturer", "short_description", "description",
+                "weight", "tax_class_id", "news_from_date", "news_to_date"],
+    "Meta": ["meta_title", "meta_description", "meta_keyword", "url_key"],
+    "Prices": ["price", "special_price", "special_from_date", "special_to_date", "cost"],
+}
+LINK_TYPES = {"related": "Related products", "up_sell": "Up-sells", "cross_sell": "Cross-sells"}
+GOOGLE_SEARCH_CONSOLE = ('<span style="color:#FBBC05">Googl</span><span style="color:#EA4335">e</span> '
+                         '<span style="color:#34A853">Search</span> '
+                         '<span style="color:#4285F4">Console</span>')
+GOOGLE_ANALYTICS = ('<span style="color:#E37400">Google</span> '
+                    '<span style="color:#F9AB00">Analytics</span>')
+
+
+def google_label(kind):
+    return GOOGLE_SEARCH_CONSOLE if kind == "search_console" else GOOGLE_ANALYTICS
+
+
+# --- shared ----------------------------------------------------------------------
+def mg():
+    return st.session_state.get("mg")
+
+
+def cache():
+    if "cache" not in st.session_state:
+        st.session_state.cache = core.load_cache()
+    return st.session_state.cache
+
+
+def header():
+    left, right = st.columns([3, 2])
+    left.markdown("### 🚀 Houston")
+    on = mg() is not None
+    color, text = ("#1f8a4c", "● biomania.ro connected") if on else ("#8a8a85", "○ biomania.ro not connected")
+    right.markdown(f'<div style="text-align:right;margin-top:0.6rem"><span style="background:{color};color:#fff;'
+                   f'padding:4px 12px;border-radius:6px;font-size:0.85rem">{text}</span></div>',
+                   unsafe_allow_html=True)
+
+
+def sidebar_connection():
+    with st.sidebar:
+        st.divider()
+        if mg():
+            st.caption(f"Connected as {mg().user}")
+            c = cache()
+            if c:
+                with st.expander(f"Catalogue copy · {c['loaded_at'][:16]}"):
+                    load_controls("reload")
+            import views_channels
+            views_channels.orders_box(mg())
+            if st.button("Disconnect"):
+                mg().logout()
+                del st.session_state["mg"]
+                st.rerun()
+            return
+        with st.form("connect"):
+            st.caption("Connect to the store")
+            user = st.text_input("API user", "biomania-script")
+            key = st.text_input("API key", type="password")
+            if st.form_submit_button("Connect"):
+                key = key.strip()
+                if core.invisible(key):
+                    st.error("The key contains invisible characters. Paste it again.")
+                elif key:
+                    m = Magento(URL, user.strip(), key)
+                    try:
+                        m.login()
+                        st.session_state.mg = m
+                        st.rerun()
+                    except ApiError as e:
+                        st.error(str(e))
+
+
+def compaction_gate():
+    """Runs once: the three big Google tables move to compact storage, then the file shrinks."""
+    if core.setting("shrink_pending") == "1" and not core.needs_compaction():
+        with st.spinner("Shrinking the database file (a step that couldn't run last time)…"):
+            core.shrink()
+        return
+    if not core.needs_compaction():
+        return
+    st.header("One moment: making the database smaller")
+    st.write("Houston is reorganising its Google data so the database takes much less space. Nothing is deleted: "
+             "every total is checked before the old tables are removed, and a full copy of the old database is kept "
+             "first. This runs once and takes a few minutes. Don't close this tab.")
+    bar = st.progress(0.0)
+    try:
+        report = core.compact_now(lambda f, t: bar.progress(min(float(f), 1.0), text=t))
+    except Exception as e:
+        st.error(f"Stopped: {e}\n\nNothing was lost: every table is checked on its own, and the one that didn't match "
+                 "was left as it was. Houston can't pull Google data until this is solved: send this message to Claude.")
+        st.stop()
+    st.session_state.compaction = report
+    st.rerun()
+
+
+def backup_box():
+    last = core.last_backup()
+    age = None
+    if last:
+        age = (datetime.datetime.now() - datetime.datetime.strptime(last["at"], "%Y-%m-%d %H:%M:%S")).days
+    with st.sidebar:
+        if age is None or age >= 7:
+            st.caption("⚠️ " + ("No backup yet." if age is None else f"Last backup {age} days ago."))
+        with st.expander("Backup · never" if not last else f"Backup · {last['at'][:16]}"):
+            folder = st.text_input("Backup folder (inside Google Drive)",
+                                   core.setting("backup_dir") or core.guess_backup_dir(), key="bk_dir",
+                                   help="For example G:\\My Drive\\Houston backups. Houston creates the folder if needed.")
+            st.caption("Each backup is one zip: the database, push backups, uploads and the work log. "
+                       "Houston keeps the newest 8 there. Your Google login (secrets) is never included.")
+            if st.button("Back up now", key="bk_go", use_container_width=True):
+                if not folder.strip():
+                    st.error("Choose a folder first.")
+                else:
+                    try:
+                        with st.spinner("Making a clean copy and compressing it…"):
+                            r = core.backup_now(folder.strip())
+                        core.set_setting("backup_dir", folder.strip())
+                        st.success(f"Saved {Path(r['file']).name} ({r['mb']} MB).")
+                    except Exception as e:
+                        st.error(f"Backup failed: {e}")
+            if last:
+                st.caption(f"Last: {Path(last['file']).name}, {last['mb']} MB")
+
+
+def need_connection():
+    if not mg():
+        st.warning("Connect to the store first: enter the API key at the bottom of the left sidebar.")
+        st.stop()
+    return mg()
+
+
+def load_controls(key="load"):
+    scope = st.radio("Products to load", ["Live only", "All, including disabled"], horizontal=True, key=key + "_scope")
+    if st.button("Load catalogue from the store" if key == "load" else "Reload from the store", key=key, type="primary"):
+        m = need_connection()
+        bar = st.progress(0.0, "Starting")
+        try:
+            st.session_state.cache = core.load_catalogue(m, scope == "Live only",
+                                                         lambda f, t: bar.progress(min(float(f), 1.0), t))
+            health.rebuild_quietly("Catalogue load")
+            st.rerun()
+        except ApiError as e:
+            st.error(str(e))
+
+
+def need_cache():
+    c = cache()
+    if not c:
+        st.info("The catalogue isn't loaded yet. Loading reads every product from the store once; "
+                "after that Houston works from a local copy and refreshes the products you change.")
+        load_controls()
+        st.stop()
+    return c
+
+
+def alabel(attrs, code):
+    a = attrs.get(code, {})
+    return f"{a.get('label') or code} ({code})"
+
+
+def attr_widget(a, value, key):
+    """One input for one attribute. Returns the value as Magento stores it."""
+    code, t = a["code"], a.get("type", "text")
+    label = alabel({code: a}, code)
+    value = core.norm(value) if not isinstance(value, list) else ",".join(value)
+    if code in core.LOCKED_PRODUCT:
+        st.text_input(label + " · locked", value, disabled=True, key=key)
+        return value
+    opts = a.get("options") or []
+    if t in ("select", "boolean") and opts:
+        values = [""] + [o["value"] for o in opts]
+        names = {o["value"]: o["label"] for o in opts}
+        if value not in values:
+            values.append(value)
+        return st.selectbox(label, values, index=values.index(value),
+                            format_func=lambda v: names.get(v, "(empty)" if v == "" else v), key=key)
+    if t == "multiselect" and opts:
+        names = {o["value"]: o["label"] for o in opts}
+        current = [x for x in value.split(",") if x in names]
+        return ",".join(st.multiselect(label, list(names), default=current, format_func=lambda v: names[v], key=key))
+    if t in ("media_image", "gallery"):
+        st.text_input(label + " · change in Images", value, disabled=True, key=key)
+        return value
+    if t == "textarea":
+        out = st.text_area(label, value, key=key, height=160 if code == "description" else 90)
+    else:
+        out = st.text_input(label, value, key=key)
+    if code.startswith("meta_") or code == "name":
+        st.caption(f"{len(out)} characters")
+    return out
+
+
+def product_filters(c, key, search_options=None, show_status=True):
+    prods, attrs = c["products"], c["attributes"]
+    cats = core.flat_categories(c.get("tree") or {})
+    filters = st.columns(3 if show_status else 2)
+    f1 = filters[0]
+    q = f1.text_input("Search name or SKU", key=key + "_q").strip().lower()
+    if show_status:
+        status = filters[1].selectbox("Status", ["All", "Live", "Disabled"], key=key + "_st")
+    else:
+        status = "Live"
+    cat = filters[-1].selectbox("Category", [None] + cats, key=key + "_cat",
+                       format_func=lambda x: "Any" if x is None else "\u2003" * max(x[2] - 1, 0) + x[1])
+    if search_options is None:
+        problems = st.multiselect("Show only products with", ["No meta description", "No meta title",
+                                                              "No short description", "No description"], key=key + "_pr")
+    else:
+        problems_col, search_col = st.columns(2)
+        problems_col.markdown("**Show only products with**")
+        search_col.markdown(google_label("search_console"), unsafe_allow_html=True)
+        problems = problems_col.multiselect("Show only products with",
+                                            ["No meta description", "No meta title",
+                                             "No short description", "No description"], key=key + "_pr",
+                                            label_visibility="collapsed")
+        search_col.multiselect("Google Search Console", search_options, key=key + "_scols",
+                               label_visibility="collapsed")
+    need = {"No meta description": "meta_description", "No meta title": "meta_title",
+            "No short description": "short_description", "No description": "description"}
+    out = []
+    for sku, r in prods.items():
+        if "_error" in r:
+            continue
+        if q and q not in sku.lower() and q not in r.get("name", "").lower():
+            continue
+        if status == "Live" and r.get("status") != "1" or status == "Disabled" and r.get("status") == "1":
+            continue
+        if cat and cat[0] not in r.get("_categories", []):
+            continue
+        if any(core.has_value(r.get(need[p], "")) for p in problems):
+            continue
+        out.append(sku)
+    return out
+
+
+# --- pages -----------------------------------------------------------------------
+def page_overview():
+    st.header("Overview")
+    r = st.session_state.get("compaction")
+    if r and "after_mb" in r:
+        st.success(f"Database reorganised: {r['before_mb']} MB → {r['after_mb']} MB, every total checked. "
+                   "A full copy of the old database is in data/houston-before-compaction.db: "
+                   "delete it after a few days if everything looks right." + (f" {r['shrink']}" if r.get("shrink") else ""))
+    st.info("Sales graphs and KPIs come here once they're defined.")
+    c = cache()
+    if c:
+        prods = [r for r in c["products"].values() if "_error" not in r]
+        live = [r for r in prods if r.get("status") == "1"]
+        a, b, d, e = st.columns(4)
+        a.metric("Products loaded", len(prods))
+        b.metric("Live", len(live))
+        d.metric("Live, no meta description", sum(1 for r in live if not core.has_value(r.get("meta_description", ""))))
+        e.metric("Waiting in review", len(core.load_pending()))
+        st.caption(f"Catalogue copy from {c['loaded_at']}")
+
+
+def page_products():
+    c = need_cache()
+    attrs, prods = c["attributes"], c["products"]
+    st.header("Products")
+    import search_data as sd
+    prop = sd.default_property()
+    skus = product_filters(c, "p", list(SEARCH_COLS) if prop else None, show_status=False)
+    st.caption(f"{len(skus)} products · catalogue copy from {c['loaded_at']}")
+
+    table_codes = sorted((k for k, a in attrs.items() if a.get("type") in EDITABLE_TYPES - {"multiselect"}
+                          and k not in core.LOCKED_PRODUCT), key=lambda k: attrs[k].get("label", k).lower())
+    default = [k for k in ("name", "meta_title", "meta_description") if k in attrs]
+    cols = st.multiselect("Columns", table_codes, default=default, format_func=lambda k: alabel(attrs, k), key="p_cols")
+    search_cols, search = st.session_state.get("p_scols", []), {}
+    if prop:
+        if search_cols:
+            label = st.selectbox("Search window", list(sd.WINDOWS), key="p_swin")
+            start, end = sd.window(prop, label)
+            search = sd.per_product(prop, start, end, prods)
+            st.caption(f"Search figures for {start} to {end}." +
+                       "".join(f" Includes {n} days with no data ({a} to {b})." for a, b, n in sd.gaps_inside(prop, start, end)))
+
+    def shown(code, raw):
+        a = attrs[code]
+        if a.get("options"):
+            return core.option_label(a, raw) if raw != "" else EMPTY
+        return core.as_text(raw)
+
+    opened = st.session_state.get("p_open")
+    def search_value(sku, col):
+        r = search.get(sku)
+        if not r:
+            return "" if col == "Top query" else None
+        v = r[SEARCH_COLS[col]]
+        if col == "CTR":
+            return round(v * 100, 1)
+        if col == "Avg. position":
+            return round(v, 1) if v is not None else None
+        return v
+
+    df = pd.DataFrame([{"open": s == opened, "sku": s, **{k: shown(k, prods[s].get(k, "")) for k in cols},
+                        **{sc: search_value(s, sc) for sc in search_cols}} for s in skus],
+                      columns=["open", "sku"] + cols + search_cols)
+    df[cols] = df[cols].fillna("")
+    config = {"open": st.column_config.CheckboxColumn("Open", help="Tick to open this product below", width="small"),
+              "sku": st.column_config.TextColumn("SKU", disabled=True)}
+    for k in cols:
+        a = attrs[k]
+        if a.get("options"):
+            config[k] = st.column_config.SelectboxColumn(a.get("label", k), options=[EMPTY] + [o["label"] for o in a["options"]])
+        else:
+            config[k] = st.column_config.TextColumn(a.get("label", k))
+    for sc in search_cols:
+        config[sc] = (st.column_config.TextColumn(sc, disabled=True) if sc == "Top query" else
+                      st.column_config.NumberColumn(sc + (" %" if sc == "CTR" else ""), disabled=True))
+    # a new table (fresh edits) whenever the filters or columns change, so edits can't land on the wrong rows
+    table_key = "p_table_" + str(abs(hash((tuple(skus), tuple(cols), tuple(search_cols), st.session_state.get("p_swin")))))
+    edited = st.data_editor(df, column_config=config, hide_index=True, key=table_key)
+    ticked = [r["sku"] for _, r in edited.iterrows() if r["open"] and r["sku"] != opened]
+    if ticked and ticked[0] in skus:
+        if ticked[0] != opened:
+            st.session_state.p_open = ticked[0]
+            import product_card
+            product_card.show(ticked[0])
+            return
+    if st.button("Add table edits to review", type="primary"):
+        changes, unmatched = [], []
+        for (_, before), (_, after) in zip(df.iterrows(), edited.iterrows()):
+            sku = before["sku"]
+            edits = {}
+            for k in cols:
+                if core.norm(after[k]) == core.norm(before[k]):
+                    continue
+                a = attrs[k]
+                if a.get("options"):
+                    back = {}
+                    for o in a["options"]:
+                        back.setdefault(o["label"], o["value"])
+                    chosen = core.norm(after[k])
+                    if chosen in ("", EMPTY):
+                        edits[k] = ""
+                    elif chosen in back:
+                        edits[k] = back[chosen]
+                    else:
+                        unmatched.append(f"{sku} · {a.get('label', k)}: {chosen!r} isn't an option, so it was skipped")
+                else:
+                    edits[k] = core.norm(after[k])
+            changes += core.product_diff(sku, prods[sku], edits, attrs)
+        for u in unmatched:
+            st.error(u)
+        st.success(f"{core.queue(changes)} changes added to Review and push.") if changes else st.info("No edits found.")
+
+    st.divider()
+    if skus:
+        product_detail(c, skus)
+
+
+def product_detail(c, skus):
+    attrs, prods = c["attributes"], c["products"]
+    if st.session_state.get("p_open") not in skus:
+        st.session_state.p_open = skus[0]
+    sku = st.selectbox("Open a product", skus, key="p_open",
+                       format_func=lambda s: f"{s} · {prods[s].get('name', '')}")
+    rec = prods[sku]
+    codes = [k for k in c["set_attributes"].get(rec.get("_set", ""), []) if k in attrs]
+    grouped = {g: [k for k in ks if k in codes] for g, ks in GROUPS.items()}
+    taken = {k for ks in grouped.values() for k in ks}
+    rest = [k for k in codes if k not in taken and attrs[k].get("type") not in ("media_image", "gallery")]
+    tabs = st.tabs(["General", "Meta", "Prices", "Inventory", "Images", "Categories", "Related", "All other attributes",
+                    "Search"])
+    for tab, (gname, gcodes) in zip([tabs[0], tabs[1], tabs[2], tabs[7]],
+                                    list(grouped.items()) + [("All other attributes", rest)]):
+        with tab, st.form(f"f_{gname}_{sku}"):
+            values = {k: attr_widget(attrs[k], rec.get(k, ""), f"w_{sku}_{k}") for k in gcodes}
+            if st.form_submit_button("Add to review"):
+                ch = core.product_diff(sku, rec, {k: v for k, v in values.items() if k not in core.LOCKED_PRODUCT}, attrs)
+                st.success(f"{core.queue(ch)} changes added to Review and push.") if ch else st.info("No changes.")
+
+    with tabs[3], st.form(f"f_stock_{sku}"):
+        qty = st.text_input("Quantity", rec.get("_qty", ""), key=f"q_{sku}")
+        stock = st.selectbox("Stock status", ["1", "0"], index=0 if rec.get("_is_in_stock", "1") == "1" else 1,
+                             format_func=lambda v: "In stock" if v == "1" else "Out of stock", key=f"s_{sku}")
+        if st.form_submit_button("Add to review"):
+            ch = [core.new_change("stock", sku, f, rec.get("_" + f, ""), v, rec.get("name", ""))
+                  for f, v in (("qty", qty), ("is_in_stock", stock)) if core.norm(v) != core.norm(rec.get("_" + f, ""))]
+            st.success(f"{core.queue(ch)} changes added to Review and push.") if ch else st.info("No changes.")
+
+    with tabs[4]:
+        images_tab(sku, rec)
+    with tabs[5]:
+        categories_tab(c, sku, rec)
+    with tabs[6]:
+        related_tab(c, sku, rec)
+    with tabs[8]:
+        search_tab(sku, rec)
+
+
+def search_tab(sku, rec):
+    import search_data as sd
+    prop = sd.default_property()
+    if not prop:
+        st.markdown(f"Connect {google_label('search_console')} first: Google → {google_label('search_console')}.",
+                    unsafe_allow_html=True)
+        return
+    label = st.selectbox("Window", list(sd.WINDOWS), key=f"sw_{sku}")
+    start, end = sd.window(prop, label)
+    url = sd.page_urls(rec.get("url_key"))
+    st.caption(f"Page: {url[0] if url else '(no URL key)'} · {start} to {end}")
+    for a, b, n in sd.gaps_inside(prop, start, end):
+        st.markdown(f"This window includes {n} days with no {google_label('search_console')} data ({a} to {b}).",
+                    unsafe_allow_html=True)
+    day = sd.daily(prop, rec.get("url_key"), start, end)
+    if day.empty:
+        st.info("No search impressions for this page in this window.")
+        return
+    clicks, impr = int(day["clicks"].sum()), int(day["impressions"].sum())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Clicks", f"{clicks:,}")
+    m2.metric("Impressions", f"{impr:,}")
+    m3.metric("CTR", f"{clicks / impr:.1%}" if impr else "—")
+    m4.metric("Avg. position", f"{day['pos_x_impr'].sum() / impr:.1f}" if impr else "—")
+    a, b = st.columns(2)
+    a.caption("Impressions per day")
+    a.line_chart(day.set_index("date")[["impressions"]])
+    b.caption("Clicks per day")
+    b.line_chart(day.set_index("date")[["clicks"]])
+    q = sd.queries(prop, rec.get("url_key"), start, end)
+    st.markdown(f"**Searches that showed this page** · {len(q)} queries")
+    st.dataframe(q, hide_index=True, column_config={
+        "query": st.column_config.TextColumn("Query"), "impressions": st.column_config.NumberColumn("Impressions"),
+        "clicks": st.column_config.NumberColumn("Clicks"),
+        "ctr": st.column_config.NumberColumn("CTR %", format="%.1f"),
+        "position": st.column_config.NumberColumn("Avg. position", format="%.1f")})
+    st.caption("Google leaves anonymised searches out of the query list, so it adds up to less than the totals above.")
+
+
+def images_tab(sku, rec):
+    if not mg():
+        st.info("Connect to the store to see images.")
+        return
+    try:
+        media = mg().media(sku)
+    except ApiError as e:
+        st.error(str(e))
+        return
+    with st.form(f"f_img_{sku}"):
+        edits = []
+        for i, m in enumerate(media):
+            a, b = st.columns([1, 3])
+            if m.get("url"):
+                a.image(m["url"], width=110)
+            label = b.text_input("Label", core.norm(m.get("label")), key=f"il_{sku}_{i}")
+            types = b.multiselect("Used as", ["image", "small_image", "thumbnail"], default=[t for t in m.get("types") or []
+                                  if t in ("image", "small_image", "thumbnail")], key=f"it_{sku}_{i}")
+            hide = b.checkbox("Hidden on product page", core.norm(m.get("exclude")) == "1", key=f"ie_{sku}_{i}")
+            remove = b.checkbox("Remove this image", key=f"ir_{sku}_{i}")
+            old = {"label": core.norm(m.get("label")), "types": sorted(m.get("types") or []), "exclude": core.norm(m.get("exclude")) or "0"}
+            new = {"label": label, "types": sorted(types), "exclude": "1" if hide else "0"}
+            if remove:
+                edits.append(core.new_change("image_remove", sku, "image", m.get("file", ""), "", rec.get("name", ""),
+                                             file=m.get("file"), key=m.get("file")))
+            elif new != old:
+                edits.append(core.new_change("image_update", sku, "image", str(old), str(new), rec.get("name", ""),
+                                             file=m.get("file"), data=new, old_data=old, key=m.get("file")))
+        if not media:
+            st.caption("No images.")
+        if st.form_submit_button("Add image changes to review"):
+            st.success(f"{core.queue(edits)} changes added to Review and push.") if edits else st.info("No changes.")
+    with st.form(f"f_up_{sku}"):
+        up = st.file_uploader("Add an image", type=["jpg", "jpeg", "png"], key=f"up_{sku}")
+        label = st.text_input("Label", rec.get("name", ""), key=f"upl_{sku}")
+        types = st.multiselect("Used as", ["image", "small_image", "thumbnail"], key=f"upt_{sku}")
+        if st.form_submit_button("Add upload to review") and up:
+            stored = core.save_upload(up.name, up.getvalue())
+            data = {"file": {"mime": up.type, "name": up.name.rsplit(".", 1)[0]},
+                    "label": label, "position": 0, "types": types, "exclude": 0}
+            st.success(f"{core.queue([core.new_change('image_add', sku, 'image', '', up.name, rec.get('name', ''), data=data, upload=stored, key=up.name)])} change added to Review and push.")
+
+
+def categories_tab(c, sku, rec):
+    flat = core.flat_categories(c.get("tree") or {})
+    names = {cid: label for cid, _, _, label in flat}
+    current = [x for x in rec.get("_categories", []) if x in names]
+    with st.form(f"f_cat_{sku}"):
+        chosen = st.multiselect("Categories", list(names), default=current, format_func=lambda x: names[x], key=f"pc_{sku}")
+        st.caption("Assigning a product to a category doesn't change any URL.")
+        if st.form_submit_button("Add to review"):
+            ch = [core.new_change("cat_assign", sku, "category", "", names[x], rec.get("name", ""), category_id=x, key=x)
+                  for x in chosen if x not in current]
+            ch += [core.new_change("cat_remove", sku, "category", names[x], "", rec.get("name", ""), category_id=x, key=x)
+                   for x in current if x not in chosen]
+            st.success(f"{core.queue(ch)} changes added to Review and push.") if ch else st.info("No changes.")
+
+
+def related_tab(c, sku, rec):
+    if not mg():
+        st.info("Connect to the store to see related products.")
+        return
+    for ltype, title in LINK_TYPES.items():
+        try:
+            linked = [core.norm(x.get("sku")) for x in mg().links(ltype, sku)]
+        except ApiError as e:
+            st.error(f"{title}: {e}")
+            continue
+        with st.form(f"f_link_{ltype}_{sku}"):
+            st.markdown(f"**{title}**")
+            names = c["products"]
+            remove = st.multiselect("Linked now · tick to remove", linked, key=f"lr_{ltype}_{sku}",
+                                    format_func=lambda s: f"{s} · {names.get(s, {}).get('name', '')}")
+            add = st.text_input("Add SKUs, separated by commas", key=f"la_{ltype}_{sku}")
+            if st.form_submit_button("Add to review"):
+                ch = [core.new_change("link_remove", sku, ltype, s, "", rec.get("name", ""), key=s) for s in remove]
+                ch += [core.new_change("link_add", sku, ltype, "", s.strip(), rec.get("name", ""), key=s.strip())
+                       for s in add.split(",") if s.strip() and s.strip() not in linked]
+                st.success(f"{core.queue(ch)} changes added to Review and push.") if ch else st.info("No changes.")
+
+
+def page_bulk():
+    c = need_cache()
+    attrs, prods = c["attributes"], c["products"]
+    st.header("Bulk edit")
+    st.subheader("1 · Products")
+    skus = product_filters(c, "b")
+    st.caption(f"{len(skus)} products match")
+    codes = sorted((k for k, a in attrs.items() if a.get("type") in EDITABLE_TYPES and k not in core.LOCKED_PRODUCT),
+                   key=lambda k: attrs[k].get("label", k).lower())
+    st.subheader("2 · Attribute")
+    code = st.selectbox("Attribute", codes, format_func=lambda k: alabel(attrs, k), key="b_code",
+                        index=codes.index("meta_description") if "meta_description" in codes else 0)
+    a = attrs[code]
+    st.subheader("3 · New values")
+    mode = st.radio("How", ["Same value for all matching products", "Paste a list: SKU, value"], key="b_mode")
+    new_map, errors = {}, []
+    if mode.startswith("Same"):
+        value = attr_widget(a, "", "b_value")
+        clear = st.checkbox(f"Clear {a.get('label', code)} on all matching products instead", key="b_clear")
+        if clear:
+            new_map = {s: "" for s in skus}
+        elif value != "":
+            new_map = {s: value for s in skus}
+    else:
+        st.caption("One product per line: the SKU, then a tab or comma, then the value. The list ignores the filters above. "
+                   "For dropdown attributes, write the option's name.")
+        text = st.text_area("List", height=180, key="b_list")
+        by_stripped = {s.strip(): s for s in prods}
+        back = {o["label"].lower(): o["value"] for o in a.get("options") or []}
+        for n, line in enumerate(text.splitlines(), 1):
+            if not line.strip():
+                continue
+            sep = "\t" if "\t" in line else ","
+            if sep not in line:
+                errors.append(f"line {n}: no tab or comma")
+                continue
+            raw_sku, value = line.split(sep, 1)
+            sku = raw_sku if raw_sku in prods else by_stripped.get(raw_sku.strip())
+            if not sku:
+                errors.append(f"line {n}: SKU {raw_sku.strip()!r} not found")
+                continue
+            value = value.strip()
+            if a.get("options"):
+                if value.lower() not in back:
+                    errors.append(f"line {n}: {value!r} isn't an option of {a.get('label')}")
+                    continue
+                value = back[value.lower()]
+            new_map[sku] = value
+    for e in errors:
+        st.error(e)
+    changes = []
+    for sku, value in new_map.items():
+        changes += core.product_diff(sku, prods[sku], {code: value}, attrs)
+    if changes:
+        st.subheader("Preview")
+        prev = [{"SKU": ch["target"], "Name": ch["target_label"],
+                 "Now": ch.get("extra", {}).get("old_label") or ch["old"], "New": ch.get("extra", {}).get("new_label") or ch["new"],
+                 "Check": " · ".join(x for x in core.check(ch, attrs) if x)} for ch in changes]
+        st.dataframe(pd.DataFrame(prev), hide_index=True)
+        if st.button(f"Add {len(changes)} changes to review", type="primary"):
+            core.queue(changes)
+            st.success(f"{len(changes)} changes added to Review and push.")
+    elif new_map:
+        st.info("Every product already has this value.")
+
+
+def page_categories():
+    c = need_cache()
+    m = need_connection()
+    st.header("Categories")
+    flat = core.flat_categories(c.get("tree") or {})
+    if not flat:
+        st.info("No categories loaded.")
+        return
+    sel = st.selectbox("Category", flat, key="c_sel", format_func=lambda x: "\u2003" * x[2] + x[1])
+    cid = sel[0]
+    try:
+        info = m.category_info(cid)
+    except ApiError as e:
+        st.error(str(e))
+        return
+    fields = ["name", "is_active", "include_in_menu", "description", "meta_title", "meta_description", "meta_keywords"]
+    with st.form(f"f_c_{cid}"):
+        vals = {}
+        for f in fields:
+            cur = core.norm(info.get(f))
+            if f in ("is_active", "include_in_menu"):
+                vals[f] = st.selectbox(f.replace("_", " ").capitalize(), ["1", "0"], index=0 if cur != "0" else 1,
+                                       format_func=lambda v: "Yes" if v == "1" else "No", key=f"c_{cid}_{f}")
+            elif f == "description":
+                vals[f] = st.text_area("Description", cur, height=140, key=f"c_{cid}_{f}")
+            else:
+                vals[f] = st.text_input(f.replace("_", " ").capitalize(), cur, key=f"c_{cid}_{f}")
+        st.text_input("URL key · locked", core.norm(info.get("url_key")), disabled=True, key=f"c_{cid}_url")
+        if st.form_submit_button("Add to review"):
+            ch = [core.new_change("category", cid, f, core.norm(info.get(f)), v, sel[1])
+                  for f, v in vals.items() if core.norm(v) != core.norm(info.get(f))]
+            st.success(f"{core.queue(ch)} changes added to Review and push.") if ch else st.info("No changes.")
+
+    st.subheader("Products in this category")
+    try:
+        assigned = [core.norm(p.get("sku")) for p in m.category_products(cid)]
+    except ApiError as e:
+        st.error(str(e))
+        assigned = []
+    prods = c["products"]
+    with st.form(f"f_ca_{cid}"):
+        remove = st.multiselect(f"{len(assigned)} products · tick to remove", assigned, key=f"ca_r_{cid}",
+                                format_func=lambda s: f"{s} · {prods.get(s, {}).get('name', '')}")
+        add = st.text_input("Add SKUs, separated by commas", key=f"ca_a_{cid}")
+        if st.form_submit_button("Add to review"):
+            ch = [core.new_change("cat_remove", s, "category", sel[1], "", prods.get(s, {}).get("name", ""), category_id=cid, key=cid)
+                  for s in remove]
+            missing = []
+            for s in (x.strip() for x in add.split(",")):
+                if not s or s in assigned:
+                    continue
+                if s not in prods:
+                    missing.append(s)
+                    continue
+                ch.append(core.new_change("cat_assign", s, "category", "", sel[1], prods[s].get("name", ""), category_id=cid, key=cid))
+            for s in missing:
+                st.error(f"SKU {s!r} not found in the loaded catalogue")
+            st.success(f"{core.queue(ch)} changes added to Review and push.") if ch else st.info("No changes.")
+
+    with st.form(f"f_cn_{cid}"):
+        st.subheader("Add a subcategory here")
+        name = st.text_input("Name", key=f"cn_{cid}")
+        if st.form_submit_button("Add to review") and name.strip():
+            core.queue([core.new_change("cat_create", cid, "subcategory", "", name.strip(), sel[1], key=name.strip())])
+            st.success("New subcategory added to Review and push.")
+
+
+def page_attributes():
+    c = need_cache()
+    attrs, prods = c["attributes"], c["products"]
+    st.header("Attributes")
+    live = [r for r in prods.values() if "_error" not in r]
+    rows = [{"Attribute": a.get("label", k), "Code": k, "Type": a.get("type", ""), "Scope": a.get("scope", ""),
+             "Products with a value": sum(1 for r in live if core.has_value(r.get(k, "")))}
+            for k, a in sorted(attrs.items(), key=lambda kv: kv[1].get("label", kv[0]).lower())]
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    missing = {k: a["label_error"] for k, a in attrs.items() if a.get("label_error")}
+    if missing:
+        with st.expander(f"{len(missing)} attributes came without a name from the store"):
+            st.dataframe(pd.DataFrame([{"Code": k, "Reason": r} for k, r in sorted(missing.items())]), hide_index=True)
+
+    dropdowns = [k for k, a in attrs.items() if a.get("options") is not None and a.get("type") in ("select", "multiselect")]
+    if not dropdowns:
+        return
+    st.subheader("Dropdown options")
+    code = st.selectbox("Attribute", sorted(dropdowns, key=lambda k: attrs[k].get("label", k).lower()),
+                        format_func=lambda k: alabel(attrs, k), key="a_sel")
+    a = attrs[code]
+    counts = {}
+    for r in live:
+        for v in core.as_text(r.get(code, "")).split(","):
+            counts[v] = counts.get(v, 0) + 1
+    st.dataframe(pd.DataFrame([{"Option": o["label"], "ID": o["value"], "Products using it": counts.get(o["value"], 0)}
+                               for o in a.get("options") or []]), hide_index=True)
+    with st.form(f"f_opt_{code}"):
+        label = st.text_input("New option name", key=f"opt_{code}")
+        if st.form_submit_button("Add to review") and label.strip():
+            if label.strip().lower() in {o["label"].lower() for o in a.get("options") or []}:
+                st.error("That option already exists.")
+            else:
+                core.queue([core.new_change("option_add", code, "option", "", label.strip(), a.get("label", code), key=label.strip())])
+                st.success("New option added to Review and push.")
+    st.caption("Renaming or deleting options isn't possible through Magento's API, so do that in the admin.")
+
+
+KIND_LABEL = {"product": "Product field", "stock": "Stock", "category": "Category field", "cat_assign": "Add to category",
+              "cat_remove": "Remove from category", "cat_create": "New subcategory", "link_add": "Add link",
+              "link_remove": "Remove link", "image_update": "Image", "image_add": "Upload image",
+              "image_remove": "Remove image", "option_add": "New option",
+              "winmentor": "WinMENTOR (for the operator)"}
+
+
+def _row(ch, attrs, status=None, note=None):
+    st_, nt = (status, note) if status else core.check(ch, attrs)
+    e = ch.get("extra", {})
+    return {"What": KIND_LABEL.get(ch["kind"], ch["kind"]), "Item": f"{ch['target']} · {ch.get('target_label', '')}",
+            "Field": ch.get("field", ""), "From": e.get("old_label") or ch.get("old", ""),
+            "To": e.get("new_label") or ch.get("new", ""), "Check": st_, "Note": nt}
+
+
+def page_review():
+    st.header("Review and push")
+    if "last_push" in st.session_state:
+        res = st.session_state.pop("last_push")
+        ok = sum(1 for r in res if r["Check"] in ("Done", "Sent to the operator"))
+        (st.success if ok == len(res) else st.warning)(f"{ok} of {len(res)} changes written and checked.")
+        st.dataframe(pd.DataFrame(res), hide_index=True)
+        sent = sum(1 for r in res if r["Check"] == "Sent to the operator")
+        if sent:
+            st.info(f"{sent} WinMENTOR changes went to the operator's list: Data health, tab For the operator.")
+    pending = core.load_pending()
+    if not pending:
+        st.info("Nothing is waiting. Changes you make in Catalogue appear here before anything is written.")
+        return
+    attrs = (cache() or {}).get("attributes", {})
+    rows = []
+    for ch in pending:
+        r = _row(ch, attrs)
+        r["Push"] = r["Check"] == "Passed"
+        r["Discard"] = False
+        rows.append(r)
+    df = pd.DataFrame(rows)[["Push", "Discard", "Check", "Note", "What", "Item", "Field", "From", "To"]]
+    st.caption("Passed changes are ticked. Warnings need your tick. Blocked changes can't be pushed.")
+    edited = st.data_editor(df, hide_index=True, key="r_table",
+                            disabled=["Check", "Note", "What", "Item", "Field", "From", "To"])
+    a, b = st.columns(2)
+    if a.button("Discard ticked"):
+        drop = {pending[i]["id"] for i, r in edited.iterrows() if r["Discard"]}
+        core.save_pending([p for p in pending if p["id"] not in drop])
+        st.rerun()
+    chosen = [pending[i] for i, r in edited.iterrows() if r["Push"] and not r["Discard"] and r["Check"] != "Blocked"]
+    if b.button(f"Push {len(chosen)} changes", type="primary", disabled=False):
+        if not chosen:
+            st.info("Nothing ticked to push.")
+            return
+        m = need_connection() if any(ch["kind"] != "winmentor" for ch in chosen) else mg()
+        bar = st.progress(0.0, "Writing")
+        results = core.push(m, cache(), chosen, lambda f, t: bar.progress(min(float(f), 1.0), t))
+        st.session_state.last_push = [_row(ch, attrs, s, n) for ch, s, n in results]
+        st.rerun()
+
+
+def page_log():
+    st.header("Change log")
+    log = core.read_log()[::-1]
+    if not log:
+        st.info("No changes pushed from Houston yet.")
+        return
+    attrs = (cache() or {}).get("attributes", {})
+    rows = []
+    for e in log:
+        r = _row(e, attrs, e.get("status", ""), e.get("note", ""))
+        rows.append({"When": e.get("pushed_at", ""), **{k: r[k] for k in ("What", "Item", "Field", "From", "To")},
+                     "Result": e.get("status", ""), "Note": e.get("note", "")})
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    undoable = [e for e in log if core.undo_change(e)]
+    if undoable:
+        pick = st.selectbox("Undo a change", undoable, key="l_undo",
+                            format_func=lambda e: f"{e.get('pushed_at', '')} · {e['target']} · {e.get('field', '')}")
+        if st.button("Add undo to review"):
+            core.queue([core.undo_change(pick)])
+            st.success("Undo added to Review and push.")
+    st.caption("Changes made before Houston (2 and 5 October) are in the project record, not here.")
+
+
+def page_worklog():
+    st.header("Work log")
+    path = core.Path(__file__).parent / "notes" / "worklog.md"
+    if not path.exists():
+        st.info("No work log yet: notes/worklog.md is missing.")
+        return
+    import datetime as _dt
+    st.caption(f"notes/worklog.md · last changed {_dt.datetime.fromtimestamp(path.stat().st_mtime):%Y-%m-%d %H:%M}. "
+               "Claude updates it through the connection, with a backup in notes/backups. Edit it in any text editor.")
+    st.markdown(path.read_text(encoding="utf-8"))
+
+
+def _show_ga_result(res):
+    st.success(f"Pulled up to {res['end']}: " + ", ".join(f"{n:,} rows into {t}" for t, n in res["rows"].items()))
+    if res.get("stopped"):
+        st.warning(res["stopped"])
+    for t, err in res.get("errors", {}).items():
+        st.error(f"{t} was not pulled: {err}")
+    if res.get("tokens_left_this_hour") is not None:
+        st.markdown(f"{google_label('analytics')} allowance left this hour: "
+                    f"{res['tokens_left_this_hour']:,} tokens.", unsafe_allow_html=True)
+
+
+def closing_conn():
+    from contextlib import closing
+    return closing(core.connect())
+
+
+def _later(name):
+    st.header(name)
+    st.info(f"{name} comes after the Google setup.")
+
+
+def page_google_search_console():
+    import datetime as _dt
+    import google_sc as g
+    st.markdown(f"<h1>{google_label('search_console')}</h1>", unsafe_allow_html=True)
+    state = g.status()
+    if state == "no_client":
+        st.warning("Save the file downloaded from Google Cloud as `secrets/client_secret.json` in the Houston folder, "
+                   "then reload this page.")
+        return
+    if state == "not_signed_in":
+        st.info("Sign in once as nicoleta@biomania.ro. A browser tab opens; after you allow access, come back here.")
+        if st.button("Sign in with Google", type="primary"):
+            try:
+                g.sign_in()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Sign-in didn't complete: {e}")
+        return
+    try:
+        props = g.properties()
+    except g.GoogleError as e:
+        st.error(str(e))
+        if st.button("Sign in again"):
+            g.sign_out()
+            st.rerun()
+        return
+    if not props:
+        st.markdown(f"This Google account has no {google_label('search_console')} properties.",
+                    unsafe_allow_html=True)
+        return
+    names = [p for p, _ in props]
+    default = next((i for i, p in enumerate(names) if p.startswith("sc-domain:")), 0)
+    prop = st.selectbox("Property", names, index=default, key="gsc_prop",
+                        format_func=lambda p: f"{p} · {dict(props)[p]}")
+    last = g.latest_date(prop)
+    st.caption(f"Stored up to {last}" if last else "Nothing pulled yet. The first pull fetches about 16 months.")
+    if st.button("Update from Google" if last else "Pull 16 months", type="primary"):
+        bar = st.progress(0.0, "Starting")
+        try:
+            res = g.pull(prop, progress=lambda f, t: bar.progress(min(float(f), 1.0), t))
+            st.success(f"Pulled {res['start']} to {res['end']}: " +
+                       ", ".join(f"{n:,} rows into {t}" for t, n in res["rows"].items()))
+            last = g.latest_date(prop)
+        except g.GoogleError as e:
+            st.error(str(e))
+    if not last:
+        return
+    for gap_start, gap_end, n in g.missing_ranges(prop):
+        st.markdown(f"No data stored for {gap_start} to {gap_end} ({n} days). Google returned nothing for these dates. "
+                    f"If {google_label('search_console')} shows them as processing, try again a day later.",
+                    unsafe_allow_html=True)
+        if st.button(f"Try again for {gap_start} to {gap_end}", key=f"gap_{gap_start}"):
+            bar = st.progress(0.0, "Starting")
+            try:
+                res = g.pull(prop, start=gap_start, end=gap_end, progress=lambda f, t: bar.progress(min(float(f), 1.0), t))
+                st.success(f"Pulled {res['start']} to {res['end']}: " +
+                           ", ".join(f"{n2:,} rows into {t}" for t, n2 in res["rows"].items()))
+                st.rerun()
+            except g.GoogleError as e:
+                st.error(str(e))
+    st.markdown(f"<h3>Check against {google_label('search_console')}</h3>", unsafe_allow_html=True)
+    end = _dt.date.fromisoformat(last)
+    a, b = st.columns(2)
+    start = a.date_input("From", end - _dt.timedelta(days=27), key="gsc_from")
+    stop = b.date_input("To", end, key="gsc_to")
+    t = g.totals(prop, start.isoformat(), stop.isoformat())
+    if t:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Clicks", f"{t['clicks']:,}")
+        m2.metric("Impressions", f"{t['impressions']:,}")
+        m3.metric("CTR", f"{t['ctr']:.1%}")
+        m4.metric("Avg. position", f"{t['position']:.1f}")
+        st.markdown(f"{t['days']} days. Open {google_label('search_console')} → Performance with exactly these dates: "
+                    "clicks and impressions should match. Position is impression-weighted here, so it can differ "
+                    "slightly.", unsafe_allow_html=True)
+        with closing_conn() as c:
+            df = pd.read_sql_query("SELECT date, clicks, impressions FROM gsc_totals WHERE property = ? AND date "
+                                   "BETWEEN ? AND ? ORDER BY date", c, params=(prop, start.isoformat(), stop.isoformat()))
+        st.line_chart(df.set_index("date"))
+
+
+def page_google_analytics(title=True):
+    import datetime as _dt
+    import google_auth
+    import google_ga as ga
+    if title:
+        st.markdown(f"<h1>{google_label('analytics')}</h1>", unsafe_allow_html=True)
+    state = ga.status()
+    if state == "no_client":
+        st.warning("Save the file downloaded from Google Cloud as `secrets/client_secret.json` in the Houston folder.")
+        return
+    if state in ("not_signed_in", "needs_permission"):
+        if state == "needs_permission":
+            st.markdown(f"Houston needs read access to {google_label('analytics')}. Sign in as nicoleta@biomania.ro: "
+                        f"a browser tab opens; allow both {google_label('search_console')} and "
+                        f"{google_label('analytics')}, then come back here.", unsafe_allow_html=True)
+        else:
+            st.info("Sign in once as nicoleta@biomania.ro. A browser tab opens; after you allow access, come back here.")
+        if st.button("Sign in with Google", type="primary", key="ga_signin"):
+            try:
+                google_auth.sign_in()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Sign-in didn't complete: {e}")
+        return
+    try:
+        props = ga.properties()
+    except ga.GoogleError as e:
+        st.error(str(e))
+        if st.button("Sign in again", key="ga_signin_again"):
+            google_auth.sign_out()
+            st.rerun()
+        return
+    if not props:
+        st.markdown(f"This Google account has no {google_label('analytics')} properties.", unsafe_allow_html=True)
+        return
+    labels = dict(props)
+    names = [p for p, _ in props]
+    default = next((i for i, p in enumerate(names) if p.endswith("390051981")), 0)
+    prop = st.selectbox("Property", names, index=default, key="ga_prop",
+                        format_func=lambda p: f"{labels[p]} · {p.split('/')[-1]}")
+    last = ga.latest_date(prop)
+    st.caption(f"Stored up to {last}" if last else "Nothing pulled yet. The first pull fetches about 16 months.")
+    if st.button("Update from Google" if last else "Pull 16 months", type="primary", key="ga_pull"):
+        bar = st.progress(0.0, "Starting")
+        res = ga.pull(prop, progress=lambda f, t: bar.progress(min(float(f), 1.0), t))
+        _show_ga_result(res)
+        last = ga.latest_date(prop)
+    if not last:
+        return
+    for gap_start, gap_end, n in ga.missing_ranges(prop):
+        st.warning(f"No data stored for {gap_start} to {gap_end} ({n} days).")
+        if st.button(f"Try again for {gap_start} to {gap_end}", key=f"ga_gap_{gap_start}"):
+            _show_ga_result(ga.pull(prop, start=gap_start, end=gap_end))
+    with st.expander("Re-pull a date range"):
+        st.caption("Replaces what's stored for these dates in all four tables, for example to bring January 2026 "
+                   "into the new one-line format for Magento action links.")
+        r1, r2 = st.columns(2)
+        rp_from = r1.date_input("From", _dt.date(2026, 1, 1), key="ga_rp_from")
+        rp_to = r2.date_input("To", _dt.date(2026, 1, 31), key="ga_rp_to")
+        if st.button("Re-pull these dates", key="ga_rp_go"):
+            bar = st.progress(0.0, "Starting")
+            _show_ga_result(ga.pull(prop, start=rp_from, end=rp_to,
+                                    progress=lambda f, t: bar.progress(min(float(f), 1.0), t)))
+    with closing_conn() as c:
+        errs = pd.read_sql_query("SELECT pulled_at, table_name, start_date, end_date, error FROM ga4_pull_errors "
+                                 "WHERE property = ? ORDER BY pulled_at DESC LIMIT 20", c, params=(prop,))
+    if not errs.empty:
+        with st.expander(f"Errors from recent pulls ({len(errs)})"):
+            st.dataframe(errs, hide_index=True)
+    st.markdown(f"<h3>Check against {google_label('analytics')}</h3>", unsafe_allow_html=True)
+    end = _dt.date.fromisoformat(last)
+    a, b = st.columns(2)
+    start = a.date_input("From", end - _dt.timedelta(days=27), key="ga_from")
+    stop = b.date_input("To", end, key="ga_to")
+    t = ga.totals(prop, start.isoformat(), stop.isoformat())
+    if t:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Sessions", f"{t['sessions']:,}")
+        m2.metric("Engaged sessions", f"{t['engaged_sessions']:,}")
+        m3.metric("Purchases", f"{t['purchases']:,}")
+        m4.metric("Revenue", f"{t['revenue']:,.2f}")
+        st.markdown(f"{t['days']} days. In {google_label('analytics')} open Reports → Acquisition → Traffic "
+                    "acquisition with exactly these dates: sessions, purchases and revenue should match the totals "
+                    "row. Users aren't shown here because daily user counts can't be added up into a total for a "
+                    "period.", unsafe_allow_html=True)
+        with closing_conn() as c:
+            df = pd.read_sql_query("SELECT date, sessions FROM ga4_totals WHERE property = ? AND date BETWEEN ? AND ? "
+                                   "ORDER BY date", c, params=(prop, start.isoformat(), stop.isoformat()))
+        st.line_chart(df.set_index("date"))
+
+
+def page_google_ads():
+    _later("Google Ads")
+
+
+def page_onsite_search():
+    st.header("On-site search")
+    st.info("The on-site search log comes later.")
